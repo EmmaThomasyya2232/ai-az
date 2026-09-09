@@ -1,0 +1,14 @@
+# 复制本文件为 .dev.vars (本地开发) 或用 `wrangler secret put` 设置到线上
+# 对外发放的网关 Key, 逗号分隔多个
+GATEWAY_KEYS=sk-az-local-test-key
+
+# Azure API 版本 (数据面)
+AZURE_API_VERSION=2024-10-21
+
+# 可选: 请求超时毫秒数, 默认 120000
+# REQUEST_TIMEOUT_MS=120000
+
+# Azure 节点池 (JSON 数组, DirectKey 模式)
+# deployments: 对外模型别名 -> 实际 Azure 部署名
+# weight: 可选权重 1~10, 默认 1; enabled: 可选开关, 默认 true
+AZURE_NODES=[{"name":"node-1","endpoint":"https://YOUR-RESOURCE.openai.azure.com","apiKey":"YOUR-AZURE-KEY","deployments":{"gpt-4o":"gpt-4o","text-embedding-3-small":"text-embedding-3-small"}}]

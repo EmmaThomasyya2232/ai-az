@@ -1,0 +1,20 @@
+{
+  "name": "azure-ai-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Azure AI Manager on Cloudflare Workers - Phase 1: OpenAI-compatible gateway MVP",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "dry-run": "wrangler deploy --dry-run --outdir=.wrangler-build"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260908.1",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.0.0"
+  }
+}

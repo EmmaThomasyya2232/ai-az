@@ -1,0 +1,14 @@
+{
+  "name": "azure-ai-manager",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  }
+  // Phase 2 将追加:
+  // "d1_databases": [{ "binding": "DB", ... }]
+  // Phase 3 将追加:
+  // "triggers": { "crons": [...] }
+}
