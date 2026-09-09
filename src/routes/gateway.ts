@@ -6,6 +6,14 @@ import { loadNodes, defaultApiVersion, requestTimeoutMs, isTransientStatus } fro
 import { Balancer } from "../core/balancer";
 import { requireGatewayKey } from "../core/auth";
 import type { ResolvedGatewayKey } from "../core/gateway-keys";
+import type { AzureNode } from "../types";
+import {
+  routeDecision,
+  recordFailure,
+  recordSuccess,
+  breakerEnabled,
+} from "../core/breaker";
+import { sendAlert, alertsEnabled } from "../core/notify";
 import {
   checkRateAndQuota,
   recordUsage,
@@ -139,18 +147,102 @@ async function gateCheck(c: Context<GWEnv>) {
   );
 }
 
-/** 记录网关侧失败 (全部上游失败 502) */
+/** 记录网关侧失败 (全部上游失败 502): Webhook 告警 + 用量日志 */
 function trackGatewayFailure(
   c: Context<GWEnv>,
   meta: { node: string; deployment: string; path: string; stream: boolean },
   started: number,
   error: string
 ) {
+  if (alertsEnabled(c.env)) {
+    void sendAlert(c.env, {
+      event: "gateway.all_nodes_failed",
+      level: "error",
+      title: "网关请求失败",
+      message: `部署 '${meta.deployment}' 的全部候选节点失败: ${error}`,
+      details: { ...meta, error },
+    });
+  }
   if (!usageLoggingEnabled(c.env)) return;
   const full = usageMetaOf(c, meta);
   c.executionCtx.waitUntil(
     recordUsage(c.env, full, 502, Date.now() - started, { promptTokens: null, completionTokens: null }, error)
   );
+}
+
+// ---------- 阶段五: 节点熔断器接线 ----------
+
+/** 熔断过滤: 返回放行的候选; 全部被熔断时返回 [] */
+async function acquireByBreaker(c: Context<GWEnv>, candidates: AzureNode[]): Promise<AzureNode[]> {
+  if (!breakerEnabled(c.env)) return candidates;
+  const allowed: AzureNode[] = [];
+  for (const n of candidates) {
+    const d = await routeDecision(c.env, n.name);
+    if (d.allow) allowed.push(n);
+  }
+  return allowed;
+}
+
+/** 全部候选被熔断 -> 503 + Retry-After (剩余冷却的最小值) */
+async function circuitOpenResponse(c: Context<GWEnv>, candidates: AzureNode[]) {
+  let minWait = Number.MAX_SAFE_INTEGER;
+  for (const n of candidates) {
+    const d = await routeDecision(c.env, n.name);
+    if (!d.allow && d.retryAfterSec) minWait = Math.min(minWait, d.retryAfterSec);
+  }
+  const headers: Record<string, string> = {};
+  if (minWait !== Number.MAX_SAFE_INTEGER) headers["retry-after"] = String(minWait);
+  return c.json(
+    {
+      error: {
+        message: "All candidate nodes are circuit-open. Retry later or reset via admin API.",
+        type: "circuit_open",
+        code: "circuit_open",
+      },
+    },
+    503,
+    headers
+  );
+}
+
+/** 上游结果联动熔断器 (瞬态失败计数 / 成功闭合), 迁移时发 Webhook 告警 */
+function trackBreakerOutcome(
+  c: Context<GWEnv>,
+  node: AzureNode,
+  outcome: { status?: number; error?: string }
+) {
+  if (!breakerEnabled(c.env)) return;
+  const fail =
+    outcome.error ??
+    (outcome.status !== undefined && isTransientStatus(outcome.status)
+      ? `HTTP ${outcome.status}`
+      : null);
+  if (fail) {
+    c.executionCtx.waitUntil(
+      recordFailure(c.env, node.name, fail).then((r) => {
+        if (r.opened)
+          return sendAlert(c.env, {
+            event: "node.circuit_opened",
+            level: "error",
+            title: "节点熔断打开",
+            message: `节点 '${node.name}' 连续失败达到阈值, 已熔断: ${fail}`,
+            details: { node: node.name, error: fail },
+          });
+      })
+    );
+  } else {
+    c.executionCtx.waitUntil(
+      recordSuccess(c.env, node.name).then((r) => {
+        if (r.closed)
+          return sendAlert(c.env, {
+            event: "node.circuit_recovered",
+            level: "info",
+            title: "节点熔断恢复",
+            message: `节点 '${node.name}' 请求成功, 熔断已闭合`,
+          });
+      })
+    );
+  }
 }
 
 
@@ -189,10 +281,13 @@ async function handleJson(c: Context<GWEnv>, azurePath: string) {
   const gate = await gateCheck(c);
   if (gate) return gate;
 
-  const candidates = new Balancer(await loadNodes(c.env)).candidates(model);
-  if (candidates.length === 0) {
+  const pool = new Balancer(await loadNodes(c.env)).candidates(model);
+  if (pool.length === 0) {
     return jsonError(c, 404, `No available deployment for model '${model}'`);
   }
+  // 阶段五: 熔断过滤 (全部候选被熔断 -> 503 + Retry-After)
+  const candidates = await acquireByBreaker(c, pool);
+  if (candidates.length === 0) return circuitOpenResponse(c, pool);
 
   const isStream = body.stream === true;
   // 流式 chat 请求注入 usage 统计帧 (阶段三用量统计依赖此字段)
@@ -217,6 +312,8 @@ async function handleJson(c: Context<GWEnv>, azurePath: string) {
         body: payload,
         signal: AbortSignal.timeout(timeoutMs),
       });
+      // 阶段五: 节点结果联动熔断器 (瞬态失败计数, 成功闭合)
+      trackBreakerOutcome(c, node, { status: upstream.status });
       // 瞬态错误且有下一跳 -> 换节点重试
       if (isTransientStatus(upstream.status) && i < attempts - 1) {
         lastError = `node '${node.name}' returned HTTP ${upstream.status}`;
@@ -230,6 +327,7 @@ async function handleJson(c: Context<GWEnv>, azurePath: string) {
       }, started);
     } catch (e) {
       lastError = e instanceof Error ? e.message : String(e);
+      trackBreakerOutcome(c, node, { error: lastError });
     }
   }
 
@@ -262,10 +360,13 @@ async function handleMultipart(c: Context<GWEnv>, azurePath: string) {
   const gate = await gateCheck(c);
   if (gate) return gate;
 
-  const candidates = new Balancer(await loadNodes(c.env)).candidates(model);
-  if (candidates.length === 0) {
+  const pool = new Balancer(await loadNodes(c.env)).candidates(model);
+  if (pool.length === 0) {
     return jsonError(c, 404, `No available deployment for model '${model}'`);
   }
+  // 阶段五: 熔断过滤 (全部候选被熔断 -> 503 + Retry-After)
+  const candidates = await acquireByBreaker(c, pool);
+  if (candidates.length === 0) return circuitOpenResponse(c, pool);
 
   const forward = new FormData();
   for (const [key, value] of form.entries()) {
@@ -288,6 +389,8 @@ async function handleMultipart(c: Context<GWEnv>, azurePath: string) {
         body: forward,
         signal: AbortSignal.timeout(timeoutMs),
       });
+      // 阶段五: 节点结果联动熔断器
+      trackBreakerOutcome(c, node, { status: upstream.status });
       if (isTransientStatus(upstream.status) && i < attempts - 1) {
         lastError = `node '${node.name}' returned HTTP ${upstream.status}`;
         continue;
@@ -300,6 +403,7 @@ async function handleMultipart(c: Context<GWEnv>, azurePath: string) {
       }, started);
     } catch (e) {
       lastError = e instanceof Error ? e.message : String(e);
+      trackBreakerOutcome(c, node, { error: lastError });
     }
   }
 

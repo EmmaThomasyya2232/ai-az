@@ -435,28 +435,43 @@
   const depSummary = (deps) =>
     Object.entries(deps ?? {}).map(([m, d]) => `<span class="badge info" title="${esc(m)} → ${esc(d)}">${esc(m)}→${esc(d)}</span>`).join(" ");
 
-  const nodeRow = (n) => `
+  const nodeRow = (n, h) => `
     <tr>
       <td><b>${esc(n.name)}</b>${n.enabled ? "" : ' <span class="badge off">禁用</span>'}<div class="sub mono">${esc(n.endpoint)}</div></td>
       <td class="mono">${esc(n.apiKeyMasked)}</td>
       <td>${depSummary(n.deployments) || '<span class="muted">无</span>'}</td>
       <td>${n.weight}</td>
+      <td>${breakerBadge(h)}</td>
       <td class="mono">${shortTime(n.updatedAt)}</td>
       <td class="actions">
         <button class="btn sm ghost" data-nact="edit" data-name="${esc(n.name)}">编辑</button>
+        ${h && h.state !== "closed" ? `<button class="btn sm ghost" data-nact="resetbreaker" data-name="${esc(n.name)}">熔断复位</button>` : ""}
         <button class="btn sm danger" data-nact="del" data-name="${esc(n.name)}">删除</button>
       </td>
     </tr>`;
 
+  const breakerBadge = (h) => {
+    if (!h) return '<span class="badge on">正常</span>';
+    if (h.state === "open") return `<span class="badge off">熔断 (${h.failures} 次失败)</span>`;
+    if (h.state === "half_open") return '<span class="badge warn">半开探测</span>';
+    return '<span class="badge on">正常</span>';
+  };
+
   async function loadNodes() {
     const el = $("#nodes-list");
     if (requireTokenNotice(el)) return;
-    let data;
-    try { data = await api("/admin/nodes"); } catch (e) { renderError(el, e); return; }
+    let data, brk;
+    try {
+      [data, brk] = await Promise.all([
+        api("/admin/nodes"),
+        api("/admin/breakers").catch(() => null),
+      ]);
+    } catch (e) { renderError(el, e); return; }
     state.nodes = data.nodes ?? [];
+    const healthMap = new Map((brk?.breakers ?? []).map((b) => [b.nodeName, b]));
     el.innerHTML = state.nodes.length ? `<div class="tbl-wrap"><table class="tbl">
-      <thead><tr><th>节点</th><th>API Key</th><th>部署映射 (模型→部署)</th><th>权重</th><th>更新时间</th><th></th></tr></thead>
-      <tbody>${state.nodes.map(nodeRow).join("")}</tbody></table></div>`
+      <thead><tr><th>节点</th><th>API Key</th><th>部署映射 (模型→部署)</th><th>权重</th><th>熔断</th><th>更新时间</th><th></th></tr></thead>
+      <tbody>${state.nodes.map((n) => nodeRow(n, healthMap.get(n.name))).join("")}</tbody></table></div>`
       : `<div class="empty">节点池为空 — 网关请求将返回 503。可手动添加，或在「☁️ Azure 资源」页从订阅一键导入。</div>`;
   }
 
@@ -522,6 +537,13 @@
       const n = state.nodes.find((x) => x.name === name);
       if (!n) return;
       if (btn.dataset.nact === "edit") nodeFormModal(null, n);
+      if (btn.dataset.nact === "resetbreaker") {
+        try {
+          await api(`/admin/breakers/${encodeURIComponent(name)}/reset`, { method: "POST" });
+          toast("熔断器已复位 ✓");
+          loadNodes();
+        } catch (err) { toast(err.message, "err"); }
+      }
       if (btn.dataset.nact === "del") {
         if (!(await confirmDialog(`删除节点「${name}」？`))) return;
         try { await api(`/admin/nodes/${encodeURIComponent(name)}`, { method: "DELETE" }); toast("已删除"); loadNodes(); }
@@ -817,6 +839,21 @@ curl ${location.origin}/v1/chat/completions \\
 # 流式: 追加 "stream": true (SSE 透传, 用量仍在后台统计)`;
   }
 
+  // ---------- 阶段五: 面板手动巡检 ----------
+  async function runPatrolNow() {
+    const out = $("#set-patrol-out");
+    out.style.display = "block";
+    out.textContent = "巡检中… (节点探活 / 令牌预热 / 日志清理)";
+    try {
+      const res = await api("/admin/patrol", { method: "POST" });
+      out.textContent = JSON.stringify(res.summary, null, 2);
+      toast("巡检完成 ✓");
+    } catch (e) {
+      out.textContent = `巡检失败: ${e.message}`;
+      toast(e.message, "err");
+    }
+  }
+
   // ---------- 初始化 ----------
   function boot() {
     document.querySelectorAll("#nav a").forEach((a) =>
@@ -831,6 +868,7 @@ curl ${location.origin}/v1/chat/completions \\
     wireNodes();
     wireSps();
     wireArmAccounts();
+    $("#set-patrol-run").addEventListener("click", runPatrolNow);
 
     window.addEventListener("hashchange", () => {
       const name = location.hash.replace("#", "") || "overview";

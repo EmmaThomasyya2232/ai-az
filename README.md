@@ -46,6 +46,23 @@
   - `GET /admin/usage?days=7&key=<id>`（总览 + 按日 + 按 Key + 按部署聚合）
   - `GET /admin/usage/logs?limit=50&key=<id>`、`DELETE /admin/usage/logs?days=7`（日志查询/清理）
 
+## 阶段五已实现（巡检 / 熔断 / 告警 / 交付）
+
+- ✅ **节点熔断状态机**（`migrations/0004_breaker.sql` + `src/core/breaker.ts`，D1 持久化、跨 isolate 共享）：
+  - 状态机：`closed` --连续失败 ≥ 阈值(默认3)--> `open` --冷却到期(默认120s, 原子抢占)--> `half_open` --成功--> 删行闭合 / --失败--> 重新 `open`
+  - 网关调度前过滤熔断节点；全部候选被熔断时返回 **503 `circuit_open`** + `Retry-After`（剩余冷却最小值）
+  - 瞬态失败（408/409/429/5xx/网络错误）计数，成功即清零闭合；`BREAKER_ENABLED=off` 或未绑定 DB 时无操作
+  - 面板节点列表显示熔断徽标 + 一键复位；`GET /admin/breakers`、`POST /admin/breakers/:name/reset`
+- ✅ **Cron 定时巡检**（`wrangler.jsonc triggers: */5 * * * *` + `src/core/patrol.ts` + `scheduled` 导出）：
+  - **节点探活**：`GET /openai/models`（零 token 成本）联动熔断自愈（恢复时自动闭合并发通知）
+  - **令牌预热（养号）**：剩余有效期 < `TOKEN_PREWARM_WINDOW_SEC`（默认 1800s）的 SP 令牌提前刷新，用户请求不再承担刷新延迟
+  - **日志清理**：按 `LOG_RETENTION_DAYS` 滚动删除过期请求日志
+  - 手动触发：`POST /admin/patrol`（面板设置页「立即巡检」）/ 本地 `curl "http://localhost:8787/__scheduled?cron=*/5+*+*+*+*"`
+- ✅ **Webhook 告警**（`src/core/notify.ts`）：节点熔断打开/恢复、网关全部节点失败、SP 令牌刷新失败、巡检异常汇总；
+  载荷格式 `ALERT_WEBHOOK_FORMAT`: `json`（结构化，默认）/ `slack` / `discord` / `feishu`
+- ✅ **一键部署交付**：`.github/workflows/deploy.yml` — push main 自动 typecheck → 远程 D1 迁移 → `wrangler deploy`
+  （需在仓库 Secrets 配置 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`，并在 `wrangler.jsonc` 填入真实 `database_id`）
+
 
 ## 快速开始
 
@@ -74,6 +91,10 @@ npm run dev                        # 本地开发 http://localhost:8787
 | `USAGE_LOGGING` | 阶段三用量日志开关，设为 `off` 关闭；默认开启（依赖 DB 绑定） |
 | `LOG_RETENTION_DAYS` | 阶段三请求日志保留天数，默认 7 |
 | `DEFAULT_RATE_LIMIT_PER_MIN` | 阶段三全局默认限流（次/分钟），对未单独限流的 Key（含环境变量 Key）生效；缺省不限 |
+| `BREAKER_ENABLED` / `BREAKER_FAILURE_THRESHOLD` / `BREAKER_COOLDOWN_SEC` | 阶段五熔断器：开关（默认 on）/ 熔断阈值（默认 3）/ 冷却秒数（默认 120） |
+| `ALERT_WEBHOOK_URL` / `ALERT_WEBHOOK_FORMAT` / `ALERTS_ENABLED` | 阶段五 Webhook 告警：地址 / 载荷格式 json\|slack\|discord\|feishu / 开关 |
+| `CRON_PROBE_NODES` / `CRON_PREWARM_TOKENS` / `CRON_CLEANUP_LOGS` | 阶段五 Cron 巡检任务开关（默认全开） |
+| `TOKEN_PREWARM_WINDOW_SEC` | 阶段五令牌预热窗口（秒），剩余有效期小于该值即提前刷新，默认 1800 |
 
 节点池示例：
 
@@ -237,7 +258,7 @@ curl http://localhost:8787/v1/chat/completions \
 - **阶段二**：D1 持久层（✅ 凭据 AES-GCM 加密）、✅ 节点池 CRUD 管理 API、✅ 三层令牌缓存、✅ ARM 管理面 API 全矩阵
 - **阶段三**：✅ 用量统计与配额限流（D1 化网关 Key、分钟限流 + 日配额、请求日志与统计 API）
 - **阶段四**：✅ 可视化管理面板（概览看板/Key/日志/节点池/服务主体/ARM 浏览器一键导入节点，原生 JS 零构建）
-- **阶段五**：Cron 巡检、自动养号、熔断状态机、Webhook 通知、一键部署交付
+- **阶段五**：✅ Cron 定时巡检（探活/令牌预热养号/日志清理）、✅ 节点熔断状态机、✅ Webhook 告警、✅ GitHub Actions 一键部署交付
 
 
 > 阶段二起节点池优先存 D1（凭据 AES-GCM 加密、面板在线管理）；D1 未绑定或无数据时回落 `AZURE_NODES` 环境变量（明文 Secret）。

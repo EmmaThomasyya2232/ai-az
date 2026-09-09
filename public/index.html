@@ -121,6 +121,12 @@
           <pre class="code" id="set-snippet"></pre>
         </div>
         <div class="panel">
+          <h2>定时巡检 (Cron */5 * * * *)</h2>
+          <p class="muted">节点探活 (联动熔断自愈) / 服务主体令牌预热 (养号) / 过期日志清理。任务开关见环境变量 CRON_*。</p>
+          <button class="btn primary" id="set-patrol-run">▶ 立即巡检</button>
+          <pre class="code" id="set-patrol-out" style="display:none; margin-top:12px"></pre>
+        </div>
+        <div class="panel">
           <h2>安全</h2>
           <p class="muted">管理令牌保存在浏览器 localStorage，仅发送到当前站点。更换令牌不会影响已发放的网关 Key。</p>
           <button class="btn ghost" id="set-token">🔑 更换管理令牌</button>

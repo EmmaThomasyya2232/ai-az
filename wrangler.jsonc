@@ -16,7 +16,10 @@
       "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
       "migrations_dir": "migrations"
     }
-  ]
-  // Phase 3 将追加:
-  // "triggers": { "crons": [...] }
+  ],
+  // 阶段五: 定时巡检 (节点探活 / 令牌预热 / 日志清理), 任务开关见环境变量 CRON_*
+  // 本地测试: curl "http://localhost:8787/__scheduled?cron=*/5+*+*+*+*"
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
 }

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "./types";
 import { ConfigError } from "./core/config";
 import { TokenError } from "./core/token-cache";
+import { runPatrol } from "./core/patrol";
 import { gateway } from "./routes/gateway";
 import { admin } from "./routes/admin";
 
@@ -30,4 +31,9 @@ app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));
 
 export default {
   fetch: app.fetch,
+  // 阶段五: 定时巡检 (节点探活 / 令牌预热 / 日志清理); 本地测试:
+  // curl "http://localhost:8787/__scheduled?cron=*/5+*+*+*+*"
+  scheduled: async (event, env) => {
+    await runPatrol(env, `cron:${event.cron}`);
+  },
 } satisfies ExportedHandler<Env>;

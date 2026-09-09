@@ -42,5 +42,25 @@ export interface Env {
   LOG_RETENTION_DAYS?: string;
   /** 阶段三: 全局默认限流 (次/分钟), 对未单独配置 rateLimitPerMin 的 Key 与环境变量 Key 生效; 缺省不限 */
   DEFAULT_RATE_LIMIT_PER_MIN?: string;
+  /** 阶段五: 节点熔断器开关, 'off' 关闭 (默认开启, 依赖 DB 绑定) */
+  BREAKER_ENABLED?: string;
+  /** 阶段五: 连续失败多少次后熔断, 默认 3 */
+  BREAKER_FAILURE_THRESHOLD?: string;
+  /** 阶段五: 熔断冷却秒数, 到期后半开探测, 默认 120 */
+  BREAKER_COOLDOWN_SEC?: string;
+  /** 阶段五: Webhook 告警 URL (未配置则不告警) */
+  ALERT_WEBHOOK_URL?: string;
+  /** 阶段五: Webhook 载荷格式 json|slack|discord|feishu, 默认 json */
+  ALERT_WEBHOOK_FORMAT?: string;
+  /** 阶段五: 告警开关, 'off' 关闭 */
+  ALERTS_ENABLED?: string;
+  /** 阶段五: Cron 节点探活开关, 'off' 关闭 (默认开) */
+  CRON_PROBE_NODES?: string;
+  /** 阶段五: Cron 服务主体令牌预热开关 (养号), 'off' 关闭 (默认开) */
+  CRON_PREWARM_TOKENS?: string;
+  /** 阶段五: Cron 过期日志清理开关, 'off' 关闭 (默认开) */
+  CRON_CLEANUP_LOGS?: string;
+  /** 阶段五: 令牌预热窗口秒数, 剩余有效期小于该值即提前刷新, 默认 1800 */
+  TOKEN_PREWARM_WINDOW_SEC?: string;
 }
 

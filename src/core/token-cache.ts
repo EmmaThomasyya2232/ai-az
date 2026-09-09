@@ -61,15 +61,18 @@ export async function getAccessToken(
     clientSecret: string;
     scope: string;
     refresh?: boolean;
+    /** 提前刷新窗口毫秒 (剩余有效期小于该值即视为需要刷新), 默认 5 分钟; Cron 预热传入更大窗口 */
+    skewMs?: number;
   }
 ): Promise<TokenResult> {
   const key = buildCacheKey(opts.tenantId, opts.clientId, opts.scope);
+  const skew = opts.skewMs ?? REFRESH_SKEW_MS;
   const now = Date.now();
 
   if (!opts.refresh) {
     // L1: isolate 内存
     const m = memory.get(key);
-    if (m && m.expiresAt - REFRESH_SKEW_MS > now) {
+    if (m && m.expiresAt - skew > now) {
       return { token: m.token, expiresAt: m.expiresAt, source: "memory" };
     }
     // L2: D1
@@ -79,7 +82,7 @@ export async function getAccessToken(
           .prepare("SELECT token_enc, expires_at FROM token_cache WHERE cache_key = ?1")
           .bind(key)
           .first<TokenCacheRow>();
-        if (row && row.expires_at * 1000 - REFRESH_SKEW_MS > now) {
+        if (row && row.expires_at * 1000 - skew > now) {
           const token = await decryptSecret(env, row.token_enc);
           const expiresAt = row.expires_at * 1000;
           memory.set(key, { token, expiresAt });

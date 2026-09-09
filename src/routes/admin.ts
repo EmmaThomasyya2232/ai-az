@@ -42,6 +42,14 @@ import {
   type GatewayKeyInput,
 } from "../core/gateway-keys";
 import { queryUsage, queryUsageLogs, purgeUsageLogs } from "../core/usage";
+import {
+  listBreakers,
+  resetBreaker,
+  breakerEnabled,
+  breakerThreshold,
+  breakerCooldownSec,
+} from "../core/breaker";
+import { runPatrol } from "../core/patrol";
 
 
 export const admin = new Hono<{ Bindings: Env }>();
@@ -560,4 +568,36 @@ admin.delete("/usage/logs", async (c) => {
   const deleted = await purgeUsageLogs(c.env, days);
   return c.json({ ok: true, deleted, olderThanDays: days });
 });
+
+// ---------- 熔断器与定时巡检 (阶段五) ----------
+
+admin.use("/breakers", requireAdminToken);
+admin.use("/breakers/*", requireAdminToken);
+admin.use("/patrol", requireAdminToken);
+
+/** 全部节点熔断状态 + 配置 */
+admin.get("/breakers", async (c) => {
+  const rows = await listBreakers(c.env);
+  return c.json({
+    ok: true,
+    enabled: breakerEnabled(c.env),
+    threshold: breakerThreshold(c.env),
+    cooldownSec: breakerCooldownSec(c.env),
+    breakers: rows,
+  });
+});
+
+/** 手动复位节点熔断器 (回到 closed) */
+admin.post("/breakers/:name/reset", async (c) => {
+  const name = c.req.param("name");
+  const existed = await resetBreaker(c.env, name);
+  return c.json({ ok: true, name, existed });
+});
+
+/** 手动触发一次巡检 (探活/令牌预热/日志清理), 返回完整摘要 */
+admin.post("/patrol", async (c) => {
+  const summary = await runPatrol(c.env, "manual");
+  return c.json({ ok: true, summary });
+});
+
 

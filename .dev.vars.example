@@ -36,3 +36,22 @@ CREDENTIAL_ENCRYPTION_KEY=000000000000000000000000000000000000000000000000000000
 # 全局默认限流 (次/分钟): 对未单独配置限流的 D1 Key 与环境变量 Key 生效; 缺省不限
 # DEFAULT_RATE_LIMIT_PER_MIN=60
 
+# 阶段五: 熔断状态机 (默认开启, 依赖 DB 绑定)
+# BREAKER_ENABLED=on
+# 连续失败多少次后熔断, 默认 3
+# BREAKER_FAILURE_THRESHOLD=3
+# 熔断冷却秒数, 到期后半开探测, 默认 120
+# BREAKER_COOLDOWN_SEC=120
+
+# 阶段五: Webhook 告警 (未配置则不告警); 格式 json|slack|discord|feishu, 默认 json
+# ALERT_WEBHOOK_URL=https://hooks.example.com/xxx
+# ALERT_WEBHOOK_FORMAT=json
+# ALERTS_ENABLED=on
+
+# 阶段五: Cron 巡检任务开关 (默认全开, 调度见 wrangler.jsonc triggers)
+# CRON_PROBE_NODES=on
+# CRON_PREWARM_TOKENS=on
+# CRON_CLEANUP_LOGS=on
+# 令牌预热窗口秒数: 剩余有效期小于该值即提前刷新, 默认 1800
+# TOKEN_PREWARM_WINDOW_SEC=1800
+
