@@ -3,22 +3,134 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Azure AI Manager</title>
-  <style>
-    body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0;
-           display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
-    .card { text-align: center; padding: 3rem; }
-    h1 { font-size: 1.6rem; margin-bottom: .5rem; }
-    p { color: #94a3b8; }
-    code { background: #1e293b; padding: .2rem .5rem; border-radius: 6px; color: #7dd3fc; }
-  </style>
+  <title>Azure AI Manager · 管理面板</title>
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>" />
 </head>
 <body>
-  <div class="card">
-    <h1>⚡ Azure AI Manager</h1>
-    <p>Cloudflare Workers 版管理面板 · 阶段一 (网关 MVP) 已就绪</p>
-    <p>推理网关: <code>/v1/chat/completions</code> 等 · 健康检查: <code>/admin/health</code></p>
-    <p>可视化面板将在阶段四上线</p>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand">⚡ Azure AI Manager</div>
+      <nav id="nav">
+        <a data-view="overview" href="#overview">📊 概览</a>
+        <a data-view="keys" href="#keys">🔑 网关密钥</a>
+        <a data-view="logs" href="#logs">📜 用量日志</a>
+        <a data-view="nodes" href="#nodes">🖥️ 节点池</a>
+        <a data-view="sps" href="#sps">🛡️ 服务主体</a>
+        <a data-view="arm" href="#arm">☁️ Azure 资源</a>
+        <a data-view="settings" href="#settings">⚙️ 设置</a>
+      </nav>
+      <div class="sidebar-foot">
+        <span id="health-dot" class="dot"></span><span id="health-text">连接中…</span>
+      </div>
+    </aside>
+
+    <main id="main">
+      <header id="topbar">
+        <h1 id="view-title">概览</h1>
+        <div class="topbar-actions">
+          <button class="btn ghost" id="btn-refresh" title="重新加载当前页数据">↻ 刷新</button>
+          <button class="btn ghost" id="btn-token">🔑 管理令牌</button>
+        </div>
+      </header>
+
+      <!-- 概览 -->
+      <section id="view-overview" class="view">
+        <div class="toolbar">
+          <label>统计窗口
+            <select id="ov-days">
+              <option value="1">最近 1 天</option>
+              <option value="7" selected>最近 7 天</option>
+              <option value="30">最近 30 天</option>
+              <option value="90">最近 90 天</option>
+            </select>
+          </label>
+          <label>按 Key 过滤 <select id="ov-key"><option value="">全部</option></select></label>
+        </div>
+        <div id="ov-cards" class="cards"></div>
+        <div class="panel">
+          <h2>每日请求趋势</h2>
+          <div id="ov-chart" class="chart"></div>
+        </div>
+        <div class="grid-2">
+          <div class="panel"><h2>按网关密钥</h2><div id="ov-bykey"></div></div>
+          <div class="panel"><h2>按模型部署</h2><div id="ov-bydep"></div></div>
+        </div>
+      </section>
+
+      <!-- 网关密钥 -->
+      <section id="view-keys" class="view">
+        <div class="toolbar">
+          <button class="btn primary" id="keys-add">＋ 发放新 Key</button>
+          <span class="muted" id="keys-hint">明文只在创建时显示一次，数据库只存 SHA-256 摘要</span>
+        </div>
+        <div id="keys-list"></div>
+      </section>
+
+      <!-- 用量日志 -->
+      <section id="view-logs" class="view">
+        <div class="toolbar">
+          <label>条数
+            <select id="log-limit"><option>50</option><option>100</option><option>200</option><option>500</option></select>
+          </label>
+          <label>Key <select id="log-key"><option value="">全部</option></select></label>
+          <button class="btn primary" id="log-purge">🧹 清理旧日志</button>
+        </div>
+        <div id="logs-list"></div>
+      </section>
+
+      <!-- 节点池 -->
+      <section id="view-nodes" class="view">
+        <div class="toolbar">
+          <button class="btn primary" id="nodes-add">＋ 新增节点</button>
+          <span class="muted">也可以在「Azure 资源」页一键导入上游账户</span>
+        </div>
+        <div id="nodes-list"></div>
+      </section>
+
+      <!-- 服务主体 -->
+      <section id="view-sps" class="view">
+        <div class="toolbar">
+          <button class="btn primary" id="sps-add">＋ 新增服务主体</button>
+          <span class="muted">用于 ARM 探测与订阅浏览；凭据 AES-GCM 加密落库</span>
+        </div>
+        <div id="sps-list"></div>
+      </section>
+
+      <!-- Azure 资源浏览器 -->
+      <section id="view-arm" class="view">
+        <div class="toolbar">
+          <label>服务主体 <select id="arm-sp"><option value="">加载中…</option></select></label>
+          <label>订阅 <select id="arm-sub"><option value="">—</option></select></label>
+          <label>资源组 <select id="arm-rg"><option value="">全部</option></select></label>
+          <button class="btn ghost" id="arm-reload">↻ 重新加载</button>
+        </div>
+        <div id="arm-status" class="muted">选择服务主体后开始浏览。</div>
+        <div id="arm-accounts"></div>
+        <div id="arm-deployments"></div>
+      </section>
+
+      <!-- 设置 -->
+      <section id="view-settings" class="view">
+        <div class="grid-2">
+          <div class="panel"><h2>服务健康</h2><div id="set-health"></div></div>
+          <div class="panel"><h2>ARM 配置</h2><div id="set-arm"></div></div>
+        </div>
+        <div class="panel">
+          <h2>网关接入示例</h2>
+          <pre class="code" id="set-snippet"></pre>
+        </div>
+        <div class="panel">
+          <h2>安全</h2>
+          <p class="muted">管理令牌保存在浏览器 localStorage，仅发送到当前站点。更换令牌不会影响已发放的网关 Key。</p>
+          <button class="btn ghost" id="set-token">🔑 更换管理令牌</button>
+        </div>
+      </section>
+    </main>
   </div>
+
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+  <script src="/app.js"></script>
 </body>
 </html>

@@ -185,6 +185,19 @@ curl "$B/admin/usage/logs?limit=50" -H "$AT"
 curl -X DELETE "$B/admin/usage/logs?days=7" -H "$AT"
 ```
 
+### 可视化管理面板（阶段四）
+
+打开站点根路径即可使用（`/`），纯静态 SPA（原生 JS，零构建依赖），由 Worker 的 `ASSETS` 托管：
+
+- **首次使用**：弹窗输入 `ADMIN_TOKEN`（仅存浏览器 localStorage，随时可清除/更换）
+- **📊 概览**：请求 / Tokens / 错误率 / 平均延迟卡片，每日趋势柱状图，按 Key 与按部署分组统计
+- **🔑 网关密钥**：发放（明文仅显示一次，一键复制）、编辑限额、启停、吊销
+- **📜 用量日志**：最近请求明细（Key/节点/部署/状态/延迟/token/错误），按 Key 过滤，手动清理旧日志
+- **🖥️ 节点池**：节点 CRUD，部署映射（OpenAI 模型名→Azure 部署名）JSON 编辑
+- **🛡️ 服务主体**：Entra ID SP CRUD、令牌刷新/失效（L1+L2 缓存）
+- **☁️ Azure 资源浏览器**：选 SP → 订阅 → 资源组 → OpenAI/Cognitive 账户 → 部署列表，**一键 `listKeys` 导入为网关节点**（凭据自动加密落库）
+- **⚙️ 设置**：服务健康、ARM 配置元信息、网关接入示例
+
 ### 部署
 
 ```bash
@@ -223,7 +236,7 @@ curl http://localhost:8787/v1/chat/completions \
 
 - **阶段二**：D1 持久层（✅ 凭据 AES-GCM 加密）、✅ 节点池 CRUD 管理 API、✅ 三层令牌缓存、✅ ARM 管理面 API 全矩阵
 - **阶段三**：✅ 用量统计与配额限流（D1 化网关 Key、分钟限流 + 日配额、请求日志与统计 API）
-- **阶段四**：React SPA 可视化管理面板（节点池/服务主体/ARM 浏览/Key 与用量看板）
+- **阶段四**：✅ 可视化管理面板（概览看板/Key/日志/节点池/服务主体/ARM 浏览器一键导入节点，原生 JS 零构建）
 - **阶段五**：Cron 巡检、自动养号、熔断状态机、Webhook 通知、一键部署交付
 
 
