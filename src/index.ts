@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "./types";
 import { ConfigError } from "./core/config";
+import { TokenError } from "./core/token-cache";
 import { gateway } from "./routes/gateway";
 import { admin } from "./routes/admin";
 
@@ -16,6 +17,9 @@ app.get("/api/health", (c) => c.json({ ok: true, service: "azure-ai-manager" }))
 app.onError((err, c) => {
   if (err instanceof ConfigError) {
     return c.json({ error: { message: err.message, type: "config_error" } }, 500);
+  }
+  if (err instanceof TokenError) {
+    return c.json({ error: { message: err.message, type: "upstream_token_error" } }, 502);
   }
   console.error("unhandled error:", err);
   return c.json({ error: { message: "Internal Server Error" } }, 500);

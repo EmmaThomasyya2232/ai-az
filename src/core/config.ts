@@ -1,4 +1,5 @@
 import type { Env, AzureNode } from "../types";
+import { listNodesFromD1 } from "./nodes";
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -17,16 +18,23 @@ export function requestTimeoutMs(env: Env): number {
 }
 
 /**
- * Phase 1: 从 env JSON 字符串解析节点池。
- * Phase 2 将改为从 D1 读取, 本函数是唯一需要替换的入口。
+ * 节点池统一入口 (Phase 2): 优先 D1 (支持面板在线管理, 凭据加密存储),
+ * D1 未绑定 / 无数据 / 表不存在时回落 AZURE_NODES 环境变量 (Phase 1 行为)。
  */
-export function loadNodes(env: Env): AzureNode[] {
-  if (!env.AZURE_NODES || env.AZURE_NODES.trim() === "") {
+export async function loadNodes(env: Env): Promise<AzureNode[]> {
+  const fromDb = await listNodesFromD1(env);
+  if (fromDb && fromDb.length > 0) return fromDb;
+  return parseNodesEnv(env.AZURE_NODES);
+}
+
+/** Phase 1: 从 env JSON 字符串解析节点池 (现作为 D1 的回落来源) */
+export function parseNodesEnv(json: string | undefined): AzureNode[] {
+  if (!json || json.trim() === "") {
     throw new ConfigError("AZURE_NODES is not configured");
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(env.AZURE_NODES);
+    parsed = JSON.parse(json);
   } catch {
     throw new ConfigError("AZURE_NODES is not valid JSON");
   }

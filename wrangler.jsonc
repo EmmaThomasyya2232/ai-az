@@ -6,9 +6,17 @@
     "directory": "./public",
     "binding": "ASSETS",
     "run_worker_first": true
-  }
-  // Phase 2 将追加:
-  // "d1_databases": [{ "binding": "DB", ... }]
+  },
+  // 阶段二: D1 持久层。先用 `npx wrangler d1 create azure-ai-manager` 创建,
+  // 然后把输出中的 database_id 替换到下面, 并执行 `npx wrangler d1 migrations apply azure-ai-manager`
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "azure-ai-manager",
+      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ]
   // Phase 3 将追加:
   // "triggers": { "crons": [...] }
 }
