@@ -1,5 +1,7 @@
 # Azure AI Manager
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/EmmaThomasyya2232/ai-az)
+
 部署于 Cloudflare Workers 的 Azure AI 综合控制面板（零 KV / 零 DO / 零 R2，唯一持久层为 D1）。
 
 > 规划文档见上级目录 `计划文档.md`。当前为**阶段二：D1 持久层**（阶段一网关 MVP 已完成）。
@@ -70,8 +72,8 @@
 npm install
 copy .dev.vars.example .dev.vars   # 编辑 .dev.vars, 填入你的 Azure 节点信息
 
-# 阶段二: 初始化本地 D1 (wrangler dev 会自动使用 .wrangler/state 下的本地库)
-npx wrangler d1 migrations apply azure-ai-manager --local
+# 初始化本地 D1 (wrangler dev 会自动使用 .wrangler/state 下的本地库)
+npm run db:migrations:local
 
 npm run dev                        # 本地开发 http://localhost:8787
 ```
@@ -221,21 +223,62 @@ curl -X DELETE "$B/admin/usage/logs?days=7" -H "$AT"
 
 ### 部署
 
+三种方式任选其一，从上到下越来越省事：
+
+#### 方式一：Deploy to Cloudflare 按钮（零命令行，推荐新用户）
+
+点击 README 顶部的 **Deploy to Cloudflare** 按钮（或访问 `https://deploy.workers.cloudflare.com/?url=<仓库地址>`）：
+
+1. Cloudflare 自动 Fork 仓库到你的账号，并**自动创建 D1 数据库**（读取 `wrangler.jsonc`，`database_id` 占位符自动替换，无需手动填写）
+2. 在配置页按提示填写 Secrets（提示文案来自 `.dev.vars.example` 与 `package.json` 的 `cloudflare.bindings` 说明）：
+   - `ADMIN_TOKEN`（**必填**，自定义一个足够长的随机字符串，如 `openssl rand -hex 16`）
+   - `CREDENTIAL_ENCRYPTION_KEY`（**必填**，`openssl rand -hex 32` 生成，用于凭据加密，注意保存）
+   - `GATEWAY_KEYS` / `AZURE_NODES` 可留空，稍后在面板中在线配置
+3. Cloudflare 使用 `package.json` 的 `deploy` 脚本构建部署（**自动先应用 D1 迁移**），完成后即可打开面板
+
+> 注意：按钮部署要求仓库为 Public，且 Cloudflare 会把仓库 Fork 到你的账号下继续开发。
+
+#### 方式二：CLI 一键部署（一条命令，适合自己的机器）
+
+```bash
+npm install
+npx wrangler login      # 浏览器授权一次（CI 环境可用 CLOUDFLARE_API_TOKEN 环境变量）
+npm run setup
+```
+
+`npm run setup` 会自动完成：检查登录 → 查找/创建 D1 → 回填 `database_id` 到 `wrangler.jsonc` → 应用远程迁移 → 自动生成并写入缺失的 Secrets（`ADMIN_TOKEN` / `CREDENTIAL_ENCRYPTION_KEY` / `GATEWAY_KEYS`，随机生成、终端仅显示一次）→ 部署 → 打印访问地址。
+
+支持参数覆盖自动生成的值：
+
+```bash
+npm run setup -- --admin-token=你的管理令牌 --gateway-keys=sk-az-a,sk-az-b --cred-key=<64位hex>
+npm run setup -- --azure-nodes='[{"name":"node-1","endpoint":"https://xxx.openai.azure.com","apiKey":"KEY","deployments":{"gpt-4o":"gpt-4o"}}]'
+npm run setup -- --skip-deploy   # 只准备资源与 Secrets, 不部署
+```
+
+重复执行安全（幂等）：已有 D1 复用、已配置的 Secrets 跳过、迁移只应用未执行的。
+
+#### 方式三：手动分步（排查问题时使用）
+
 ```bash
 npm run typecheck        # 类型检查
 npm run dry-run          # 本地构建验证
 
-# 阶段二: 创建 D1 并应用迁移 (替换 wrangler.jsonc 中的 database_id)
+# 创建 D1 并应用迁移 (把输出的 database_id 填入 wrangler.jsonc)
 npx wrangler d1 create azure-ai-manager
-npx wrangler d1 migrations apply azure-ai-manager --remote
+npm run db:migrations:apply   # 等价于 npx wrangler d1 migrations apply DB --remote (DB 为绑定名)
 
 npx wrangler secret put GATEWAY_KEYS
 npx wrangler secret put ADMIN_TOKEN
 npx wrangler secret put CREDENTIAL_ENCRYPTION_KEY
 npx wrangler secret put AZURE_NODES      # 回落配置, D1 有数据后可省略
 npx wrangler secret put AZURE_API_VERSION
-npm run deploy
+npm run deploy                # 等价于: 迁移(幂等) + wrangler deploy
 ```
+
+#### 持续部署
+
+`.github/workflows/deploy.yml`：push main 自动 typecheck → 远程 D1 迁移（按绑定名 `DB`）→ `wrangler deploy`（需在仓库 Secrets 配置 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`）。
 
 ## 验证
 

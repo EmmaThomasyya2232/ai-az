@@ -1,5 +1,7 @@
+# 本文件供本地开发 (复制为 .dev.vars) 使用;
+# 线上一键部署 (Deploy to Cloudflare 按钮) 会读取本文件, 在部署配置页提示填写各项 Secrets
 # 复制本文件为 .dev.vars (本地开发) 或用 `wrangler secret put` 设置到线上
-# 对外发放的网关 Key, 逗号分隔多个
+# 对外发放的网关 Key, 逗号分隔多个 (可留空, 稍后在面板「网关密钥」中发放)
 GATEWAY_KEYS=sk-az-local-test-key
 
 # Azure API 版本 (数据面)
@@ -13,10 +15,10 @@ AZURE_API_VERSION=2024-10-21
 # weight: 可选权重 1~10, 默认 1; enabled: 可选开关, 默认 true
 AZURE_NODES=[{"name":"node-1","endpoint":"https://YOUR-RESOURCE.openai.azure.com","apiKey":"YOUR-AZURE-KEY","deployments":{"gpt-4o":"gpt-4o","text-embedding-3-small":"text-embedding-3-small"}}]
 
-# 阶段二: 管理 API 鉴权 Token (Bearer), 用于 /admin/nodes* CRUD
+# [必填] 管理 API / 面板鉴权 Token (Bearer); 一键部署脚本会随机生成, 也可自己指定 (如 openssl rand -hex 16)
 ADMIN_TOKEN=change-me-admin-token
 
-# 阶段二: 凭据静态加密主密钥, 32 字节; 生成: openssl rand -hex 32
+# [必填] 阶段二: 凭据静态加密主密钥, 32 字节; 生成: openssl rand -hex 32 (务必保存, 更换后已加密凭据无法解密)
 CREDENTIAL_ENCRYPTION_KEY=0000000000000000000000000000000000000000000000000000000000000000
 
 # 阶段二: Entra ID 登录端点 (三层令牌缓存 L3), 默认 https://login.microsoftonline.com

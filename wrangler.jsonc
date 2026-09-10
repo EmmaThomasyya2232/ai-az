@@ -7,8 +7,9 @@
     "binding": "ASSETS",
     "run_worker_first": true
   },
-  // 阶段二: D1 持久层。先用 `npx wrangler d1 create azure-ai-manager` 创建,
-  // 然后把输出中的 database_id 替换到下面, 并执行 `npx wrangler d1 migrations apply azure-ai-manager`
+  // 阶段二: D1 持久层。database_id 无需手动查找填写:
+  // - CLI 一键部署: npm run setup (自动创建 D1 并回填 id, 幂等可重复执行)
+  // - 线上一键部署: README 顶部 Deploy to Cloudflare 按钮 (自动创建资源并替换 id)
   "d1_databases": [
     {
       "binding": "DB",

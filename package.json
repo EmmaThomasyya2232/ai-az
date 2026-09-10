@@ -5,7 +5,10 @@
   "description": "Azure AI Manager on Cloudflare Workers - Phase 1: OpenAI-compatible gateway MVP",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "npm run db:migrations:apply && wrangler deploy",
+    "setup": "node scripts/setup.mjs",
+    "db:migrations:apply": "wrangler d1 migrations apply DB --remote",
+    "db:migrations:local": "wrangler d1 migrations apply DB --local",
     "typecheck": "tsc --noEmit",
     "dry-run": "wrangler deploy --dry-run --outdir=.wrangler-build"
   },
@@ -16,5 +19,27 @@
     "@cloudflare/workers-types": "^5.20260908.1",
     "typescript": "^5.7.0",
     "wrangler": "^4.0.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "DB": {
+        "description": "D1 持久层（节点池 / 网关 Key / 用量统计 / 熔断状态 / 令牌缓存）。部署时自动创建，无需手动填写。"
+      },
+      "ADMIN_TOKEN": {
+        "description": "**必填** 管理 API / 面板的 Bearer Token，自定义一个足够长的随机字符串，如 `openssl rand -hex 16`。首次打开面板时需要输入它。"
+      },
+      "CREDENTIAL_ENCRYPTION_KEY": {
+        "description": "**必填** 凭据静态加密主密钥，32 字节 hex，用 `openssl rand -hex 32` 生成。注意：更换后已加密的凭据将无法解密。"
+      },
+      "GATEWAY_KEYS": {
+        "description": "网关 Key（逗号分隔多个，如 `sk-az-xxx`）。可留空，稍后在面板「🔑 网关密钥」中发放（推荐）。"
+      },
+      "AZURE_NODES": {
+        "description": "Azure 节点池 JSON 数组（回落配置）。可留空，稍后在面板「🖥️ 节点池」或「☁️ Azure 资源浏览器」中添加（推荐）。"
+      },
+      "AZURE_API_VERSION": {
+        "description": "Azure 数据面 API 版本，默认 `2024-10-21`，一般无需修改。"
+      }
+    }
   }
 }
