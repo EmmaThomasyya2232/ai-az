@@ -266,12 +266,19 @@ curl -X DELETE "$B/admin/usage/logs?days=7" -H "$AT"
 
 点击 README 顶部的 **Deploy to Cloudflare** 按钮（或访问 `https://deploy.workers.cloudflare.com/?url=<仓库地址>`）：
 
-1. Cloudflare 自动 Fork 仓库到你的账号，并**自动创建 D1 数据库**（读取 `wrangler.jsonc`，`database_id` 占位符自动替换，无需手动填写）
-2. 在配置页按提示填写 Secrets（提示文案来自 `.dev.vars.example` 与 `package.json` 的 `cloudflare.bindings` 说明）：
+1. 点击后按钮流程会**直接执行 `npx wrangler deploy`**（读取仓库内 `wrangler.jsonc` 中的**真实 `database_id`**——本仓库已内置预置数据库 ID，无需手动填写；请勿改回占位符 `REPLACE_WITH_YOUR_D1_DATABASE_ID`，否则部署会因 `d1 must have a valid database_id` 失败）
+2. 首次部署前需在本地准备好远程 D1 与迁移（只需一次，幂等可重复）：
+   ```bash
+   npm install
+   npx wrangler login        # 浏览器授权一次
+   npx wrangler d1 create azure-ai-manager          # 若尚未创建, 输出的 database_id 覆盖 wrangler.jsonc
+   npm run db:migrations:apply                       # 应用 0001~0005 全部迁移到远程库
+   ```
+3. Secrets 在项目「设置 → 变量与机密」中配置（Worker 同名 Secret）：
    - `ADMIN_TOKEN`（**必填**，自定义一个足够长的随机字符串，如 `openssl rand -hex 16`）
    - `CREDENTIAL_ENCRYPTION_KEY`（**必填**，`openssl rand -hex 32` 生成，用于凭据加密，注意保存）
    - `GATEWAY_KEYS` / `AZURE_NODES` 可留空，稍后在面板中在线配置
-3. Cloudflare 使用 `package.json` 的 `deploy` 脚本构建部署（**自动先应用 D1 迁移**），完成后即可打开面板
+4. 点击按钮完成部署后即可打开面板（部署时**不会自动跑迁移**，新表需先执行步骤 2 的 `db:migrations:apply`；也可直接使用下方方式二 `npm run setup` 自动完成全部步骤）
 
 > 注意：按钮部署要求仓库为 Public，且 Cloudflare 会把仓库 Fork 到你的账号下继续开发。
 

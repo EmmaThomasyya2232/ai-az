@@ -7,14 +7,14 @@
     "binding": "ASSETS",
     "run_worker_first": true
   },
-  // 阶段二: D1 持久层。database_id 无需手动查找填写:
-  // - CLI 一键部署: npm run setup (自动创建 D1 并回填 id, 幂等可重复执行)
-  // - 线上一键部署: README 顶部 Deploy to Cloudflare 按钮 (自动创建资源并替换 id)
+  // 阶段二: D1 持久层。database_id 以下为已创建的远程数据库:
+  // - CLI 一键部署: npm run setup (复用/创建 D1 并回填 id, 幂等可重复执行)
+  // - 线上一键部署: Deploy to Cloudflare 按钮直接跑 npx wrangler deploy, 要求本文件含真实 id
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "azure-ai-manager",
-      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
+      "database_id": "bee51106-d860-4707-a15a-326690cb65c7",
       "migrations_dir": "migrations"
     }
   ],
