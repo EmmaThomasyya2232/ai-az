@@ -3,7 +3,7 @@ import type { SpRecord } from "./sp";
 import type { SubRecord } from "./subs";
 import { getSpFromD1 } from "./sp";
 import { armRequest } from "./arm";
-import { bestRegion } from "./regions";
+import { bestRegion, parseAllowedFromError, extractArmErrorMessage } from "./regions";
 import {
   listSubsFromD1,
   patchSubState,
@@ -155,6 +155,44 @@ interface CogAccountBody extends AccountResp {
   name?: unknown;
 }
 
+/** 区域被策略拒绝时的回退处理: 解析错误文本 -> 修正白名单 -> 换区重试 (最多 2 次) */
+async function regionFallbackOrFail(
+  env: Env,
+  sub: SubRecord,
+  sp: SpRecord,
+  opts: { location?: string; model?: string; retryDepth?: number },
+  failedLocation: string,
+  model: string,
+  res: { status: number; body: unknown },
+  baseMessage: string
+): Promise<BootstrapResult> {
+  const errText = extractArmErrorMessage(res.body);
+  const candidates = parseAllowedFromError(errText).filter((r) => r !== failedLocation);
+  const depth = opts.retryDepth ?? 0;
+  if (candidates.length > 0 && depth < 2) {
+    const nextLocation = candidates[0];
+    // 修正订阅白名单 (真实允许区域), 前端级联下拉随之更新
+    await patchSubState(env, sub.id, { allowedRegions: candidates });
+    const retry = await bootstrapWarmup(env, { ...sub, allowedRegions: candidates }, sp, {
+      model,
+      location: nextLocation,
+      retryDepth: depth + 1,
+    });
+    return {
+      ...retry,
+      message: `区域 '${failedLocation}' 被策略拒绝, 已切换到 '${nextLocation}' 重试 → ${retry.message}`,
+    };
+  }
+  return {
+    status: "failed",
+    accountName: "",
+    resourceGroup: WARMUP_RG,
+    location: failedLocation,
+    model,
+    message: `${baseMessage}: ${errText.slice(0, 220) || "无错误详情"}`,
+  };
+}
+
 /**
  * 一键上架流水线:
  *   1. 创建/复用资源组 (bestRegion)
@@ -162,12 +200,14 @@ interface CogAccountBody extends AccountResp {
  *   3. 部署 text-embedding-3-small (优先 GlobalStandard, 失败回退 Standard)
  *   4. 首发 2-token embedding 调用 (留下非零 Metrics), 并入库 warmup_logs
  *   5. 标记 warmup_target / warmup_status = Active
+ * 区域被策略拒绝 (RequestDisallowedByAzure) 时: 从错误文本反向解析允许区域,
+ * 修正订阅白名单并自动换区重试 (最多 2 次)。
  */
 export async function bootstrapWarmup(
   env: Env,
   sub: SubRecord,
   sp: SpRecord,
-  opts: { location?: string; model?: string } = {}
+  opts: { location?: string; model?: string; retryDepth?: number } = {}
 ): Promise<BootstrapResult> {
   const model = opts.model?.trim() || (await effectiveModel(env));
   const location = opts.location?.trim() || bestRegion(sub.allowedRegions, await effectiveDefaultRegion(env));
@@ -196,14 +236,10 @@ export async function bootstrapWarmup(
     contentType: "application/json",
   });
   if (rgRes.status !== 200 && rgRes.status !== 201 && rgRes.status !== 409) {
-    return {
-      status: "failed",
-      accountName,
-      resourceGroup: rg,
-      location,
-      model,
-      message: `创建资源组失败 (HTTP ${rgRes.status})`,
-    };
+    return await regionFallbackOrFail(
+      env, sub, sp, opts, location, model,
+      rgRes, `创建资源组失败 (HTTP ${rgRes.status})`
+    );
   }
 
   // 2. AIServices 账户 (已存在则跳过创建, 继续部署)
@@ -220,14 +256,10 @@ export async function bootstrapWarmup(
     contentType: "application/json",
   });
   if (acctRes.status !== 200 && acctRes.status !== 201 && acctRes.status !== 409) {
-    return {
-      status: "failed",
-      accountName,
-      resourceGroup: rg,
-      location,
-      model,
-      message: `创建 AIServices 账户失败 (HTTP ${acctRes.status})`,
-    };
+    return await regionFallbackOrFail(
+      env, sub, sp, opts, location, model,
+      acctRes, `创建 AIServices 账户失败 (HTTP ${acctRes.status})`
+    );
   }
 
   // 3. 部署 embedding 模型: 优先 GlobalStandard, 失败回退 Standard
@@ -253,13 +285,14 @@ export async function bootstrapWarmup(
     });
   }
   if (deployRes.status !== 200 && deployRes.status !== 201) {
+    const deployErr = extractArmErrorMessage(deployRes.body);
     return {
       status: "failed",
       accountName,
       resourceGroup: rg,
       location,
       model,
-      message: `部署模型失败 (HTTP ${deployRes.status})`,
+      message: `部署模型失败 (HTTP ${deployRes.status}): ${deployErr.slice(0, 220) || "无错误详情"}`,
     };
   }
 
@@ -338,14 +371,39 @@ export interface TierStatus {
   upgradeUnavailabilityReason: string | null;
 }
 
-interface QuotaTierResp {
+interface QuotaTierFields {
   currentTierName?: unknown;
   assignedTime?: unknown;
   tierUpgradePolicy?: unknown;
   upgradeUnavailabilityReason?: unknown;
 }
 
-/** 读取 CognitiveServices QuotaTiers (提档感知) */
+/**
+ * 真实 Azure 的 quotaTiers 响应字段可能位于:
+ *   - 顶层 (老版本/mock)      { currentTierName, ... }
+ *   - properties 嵌套 (标准)  { properties: { currentTierName, ... } }
+ *   - value 数组 (列表形式)   { value: [ { properties: {...} } ] }
+ * 统一在此归一化。
+ */
+function pickTierFields(body: unknown): QuotaTierFields {
+  if (!body || typeof body !== "object") return {};
+  const b = body as Record<string, unknown>;
+  if (Array.isArray(b.value) && b.value.length > 0) {
+    const first = b.value[0] as Record<string, unknown> | undefined;
+    return ((first?.properties ?? first ?? {}) as QuotaTierFields) ?? {};
+  }
+  const props = b.properties;
+  if (props && typeof props === "object" && !Array.isArray(props)) {
+    return props as QuotaTierFields;
+  }
+  return b as QuotaTierFields;
+}
+
+function strOrNull(v: unknown): string | null {
+  return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
+}
+
+/** 读取 CognitiveServices QuotaTiers (提档感知); api-version 可经 TIER_API_VERSION 覆盖 */
 export async function fetchTierStatus(
   env: Env,
   sp: SpRecord,
@@ -357,16 +415,15 @@ export async function fetchTierStatus(
       sp,
       "GET",
       `/subscriptions/${subscriptionId}/providers/Microsoft.CognitiveServices/quotaTiers/default`,
-      { apiVersion: AV_QUOTA_TIERS }
+      { apiVersion: env.TIER_API_VERSION ?? AV_QUOTA_TIERS }
     );
     if (!r.isJson || r.status >= 300) return null;
-    const b = r.body as QuotaTierResp | null;
+    const f = pickTierFields(r.body);
     return {
-      currentTierName: typeof b?.currentTierName === "string" ? b.currentTierName : null,
-      assignedTime: typeof b?.assignedTime === "string" ? b.assignedTime : null,
-      tierUpgradePolicy: b?.tierUpgradePolicy ?? null,
-      upgradeUnavailabilityReason:
-        typeof b?.upgradeUnavailabilityReason === "string" ? b.upgradeUnavailabilityReason : null,
+      currentTierName: strOrNull(f.currentTierName),
+      assignedTime: strOrNull(f.assignedTime),
+      tierUpgradePolicy: f.tierUpgradePolicy ?? null,
+      upgradeUnavailabilityReason: strOrNull(f.upgradeUnavailabilityReason),
     };
   } catch (e) {
     console.warn("tier detection failed:", e instanceof Error ? e.message : e);

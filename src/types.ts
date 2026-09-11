@@ -72,5 +72,7 @@ export interface Env {
   WARMUP_SKU_NAME?: string;
   /** 阶段六: 打卡消耗 tokens 上限, 默认 32 (极端情况下防失控) */
   WARMUP_MAX_TOKENS?: string;
+  /** 阶段六: QuotaTiers API 版本, 默认 2025-03-01 (Azure 版本差异时可覆盖) */
+  TIER_API_VERSION?: string;
 }
 

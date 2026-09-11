@@ -131,8 +131,8 @@ export async function allowedFromPolicy(
 export function parseAllowedFromError(text: string): string[] {
   const merged = text || "";
   const patterns: RegExp[] = [
-    // "Allowed locations: 'centralus, etc'"
-    /(?:listOfAllowedLocations|allowed\s+locations?|available\s+regions?)\s*[:：=]\s*'?([a-zA-Z0-9,\s\-]+?)'?/i,
+    // "Allowed locations: 'centralus, etc'" (matchAll 要求全局标志)
+    /(?:listOfAllowedLocations|allowed\s+locations?|available\s+regions?)\s*[:：=]\s*'?([a-zA-Z0-9,\s\-]+?)'?/gi,
     // "[centralus, canadacentral]" 数组形式
     /\[\s*([a-zA-Z0-9,\s\-]+)\s*\]/gi,
   ];
@@ -159,9 +159,48 @@ function extractErrorMessage(r: { body: unknown }): string {
   return typeof r.body === "string" ? r.body : "";
 }
 
+/** 提取 ARM 响应错误文本 (供 bootstrap 失败回退解析 allowed locations) */
+export function extractArmErrorMessage(body: unknown): string {
+  return extractErrorMessage({ body });
+}
+
 /**
- * 2) 探针回退: 对候选区域试探创建最小资源组 (成功后立即删除)。
- *    返回探测成功或从错误文本解析出的候选区域集合; 全部失败返回 []。
+ * 订阅级可用区域 (ARM 官方端点, 零副作用, 最准确):
+ * GET /subscriptions/{id}/locations 返回该订阅可使用的区域集合。
+ * 学生/受限订阅的受限区域会在此体现; 正常订阅返回全球区域 (等于不限制)。
+ */
+export async function allowedFromSubscriptionLocations(
+  env: Env,
+  sp: SpRecord,
+  subscriptionId: string
+): Promise<string[]> {
+  try {
+    const r = await armRequest(
+      env,
+      sp,
+      "GET",
+      `/subscriptions/${subscriptionId}/locations`,
+      { apiVersion: "2022-12-01" }
+    );
+    if (!r.isJson || r.status >= 300) return [];
+    const body = r.body as { value?: Array<{ name?: unknown }> };
+    const out: string[] = [];
+    for (const loc of body.value ?? []) {
+      const n = normalizeRegion(loc.name);
+      if (n) out.push(n);
+    }
+    return unique(out);
+  } catch (e) {
+    console.warn("subscription locations lookup failed:", e instanceof Error ? e.message : e);
+    return [];
+  }
+}
+
+/**
+ * 2) 探针回退: 对候选区域试探创建最小资源组 (成功后同步删除, 避免残留)。
+ *    注意: 资源组创建通常不受资源类型级区域策略约束 (学生订阅限制的是
+ *    CognitiveServices 等资源类型), 因此本探针仅作为最后兜底;
+ *    更准确的数据源是 policy listOfAllowedLocations 与订阅 /locations。
  */
 export async function probeRegions(
   env: Env,
@@ -182,8 +221,8 @@ export async function probeRegions(
       });
       if (r.status >= 200 && r.status < 300) {
         success.push(location);
-        // 试探资源组异步清理, 失败不阻塞
-        void armRequest(env, sp, "DELETE", path, { apiVersion: AV_RG }).catch(() => {});
+        // 同步清理试探资源组 (失败静默, 避免残留)
+        await armRequest(env, sp, "DELETE", path, { apiVersion: AV_RG }).catch(() => {});
       } else {
         fromErrors.push(...parseAllowedFromError(extractErrorMessage(r)));
       }
@@ -202,8 +241,11 @@ export async function probeRegions(
 }
 
 /**
- * 订阅区域可用性画像入口。
- * 优先策略解析, 其次探针回退; 两者皆空返回 null (无法判定, 调用方使用默认区域)。
+ * 订阅区域可用性画像入口 (准确性优先):
+ *   1. policy listOfAllowedLocations (策略显式枚举)
+ *   2. 订阅 /locations (ARM 官方, 零副作用)
+ *   3. 探针回退 (创建资源组, 有残留风险, 仅作兜底)
+ * 全部为空返回 null (无法判定, 调用方使用默认区域)。
  */
 export async function discoverAllowedRegions(
   env: Env,
@@ -212,6 +254,8 @@ export async function discoverAllowedRegions(
 ): Promise<string[] | null> {
   const fromPolicy = await allowedFromPolicy(env, sp, subscriptionId);
   if (fromPolicy.length > 0) return fromPolicy;
+  const fromLocations = await allowedFromSubscriptionLocations(env, sp, subscriptionId);
+  if (fromLocations.length > 0) return fromLocations;
   const probed = await probeRegions(env, sp, subscriptionId);
   return probed.length > 0 ? probed : null;
 }

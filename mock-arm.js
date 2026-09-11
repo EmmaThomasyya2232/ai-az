@@ -45,7 +45,7 @@ http
             return "";
           }
         })();
-        if (location === "centralus" || location === "eastus") {
+        if (["centralus", "eastus", "germanywestcentral", "swedencentral", "francecentral"].includes(location)) {
           return send({ name: "rg-probe-ok", location, properties: { provisioningState: "Succeeded" } });
         }
         if (location === "westus") {
@@ -103,7 +103,29 @@ http
           ],
         });
       }
-      if (/Microsoft\.CognitiveServices\/accounts\/[^/]+$/.test(p)) {
+      if (/Microsoft\.CognitiveServices\/accounts\/[^/]+$/.test(p) && req.method === "PUT") {
+        // 模拟学生订阅资源类型级区域限制: 仅 germanywestcentral 可建 CognitiveServices
+        const loc = (() => {
+          try {
+            return JSON.parse(body).location ?? "";
+          } catch {
+            return "";
+          }
+        })();
+        if (loc !== "germanywestcentral") {
+          return send(
+            {
+              error: {
+                code: "RequestDisallowedByAzure",
+                message:
+                  `Operation could not be completed as it results in forbidden approval. ` +
+                  `The subscription does not allow creating this resource in location '${loc}'. ` +
+                  `Allowed locations: germanywestcentral`,
+              },
+            },
+            403
+          );
+        }
         return send({
           name: "azmgrwu-xxxx",
           kind: "AIServices",
@@ -112,12 +134,23 @@ http
           properties: { endpoint: "http://localhost:9999", provisioningState: "Succeeded" },
         });
       }
-      if (/Microsoft\.CognitiveServices\/quotaTiers\/default$/.test(p)) {
+      if (/Microsoft\.CognitiveServices\/accounts\/[^/]+$/.test(p)) {
         return send({
-          currentTierName: "Free Tier",
-          assignedTime: "2026-01-01T00:00:00Z",
-          tierUpgradePolicy: { grace: "30d" },
-          upgradeUnavailabilityReason: null,
+          name: "azmgrwu-xxxx",
+          kind: "AIServices",
+          sku: { name: "S0", tier: "Standard" },
+          properties: { endpoint: "http://localhost:9999", provisioningState: "Succeeded" },
+        });
+      }
+      if (/Microsoft\.CognitiveServices\/quotaTiers\/default$/.test(p)) {
+        // 真实 Azure 结构: 字段嵌在 properties 里
+        return send({
+          properties: {
+            currentTierName: "Free Tier",
+            assignedTime: "2026-01-01T00:00:00Z",
+            tierUpgradePolicy: { grace: "30d" },
+            upgradeUnavailabilityReason: null,
+          },
         });
       }
       if (/locat(ion|ions)\/[^/]+\/usages$/.test(p)) {
@@ -128,28 +161,19 @@ http
           ],
         });
       }
-      if (/policyAssignments/.test(p)) {
+      // 订阅级可用区域 (学生订阅受限: 仅少数区域)
+      if (/^\/subscriptions\/[^/]+\/locations$/.test(p)) {
         return send({
           value: [
-            {
-              name: "allowed-locations",
-              properties: {
-                policyDefinitionId:
-                  "/providers/Microsoft.Authorization/policyDefinitions/e56962a6-4747-49cd-b67b-bf8b01975c4c",
-                parameters: {},
-              },
-            },
+            { name: "germanywestcentral", displayName: "Germany West Central", regionalDisplayName: "(Europe) Germany West Central" },
+            { name: "swedencentral", displayName: "Sweden Central", regionalDisplayName: "(Europe) Sweden Central" },
+            { name: "francecentral", displayName: "France Central", regionalDisplayName: "(Europe) France Central" },
           ],
         });
       }
-      if (/policyDefinitions\/e56962a6-4747-49cd-b67b-bf8b01975c4c$/.test(p)) {
-        return send({
-          properties: {
-            parameters: {
-              listOfAllowedLocations: { allowedValues: ["centralus", "eastus", "canadacentral"] },
-            },
-          },
-        });
+      if (/policyAssignments/.test(p)) {
+        // 真实学生订阅通常没有 allowed-locations 策略 -> 走订阅 /locations 探测
+        return send({ value: [] });
       }
       // 其余路径: 回显请求 (用于通用透传矩阵验证)
       return send({

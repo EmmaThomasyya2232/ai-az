@@ -16,7 +16,10 @@ import {
  */
 export const apiAlias = new Hono<{ Bindings: Env }>();
 
-apiAlias.use("*", requireAdminToken);
+// 仅拦截本别名的业务路径; /api/health (健康检查) 不需要鉴权
+apiAlias.use("/service-principals", requireAdminToken);
+apiAlias.use("/subscriptions", requireAdminToken);
+apiAlias.use("/subscriptions/*", requireAdminToken);
 
 apiAlias.post("/service-principals", importServicePrincipalHandler);
 apiAlias.post("/subscriptions/:id/safe-bootstrap", bootstrapHandler);
