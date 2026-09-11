@@ -49,7 +49,7 @@ export async function armRequest(
   armPath: string,
   opts: {
     apiVersion?: string;
-    body?: ArrayBuffer;
+    body?: BodyInit;
     contentType?: string | null;
     query?: Record<string, string>;
   } = {}

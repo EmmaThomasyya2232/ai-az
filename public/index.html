@@ -18,6 +18,8 @@
         <a data-view="nodes" href="#nodes">🖥️ 节点池</a>
         <a data-view="sps" href="#sps">🛡️ 服务主体</a>
         <a data-view="arm" href="#arm">☁️ Azure 资源</a>
+        <a data-view="warmup" href="#warmup">🌱 养号打卡</a>
+        <a data-view="quota" href="#quota">📊 配额与 Tier</a>
         <a data-view="settings" href="#settings">⚙️ 设置</a>
       </nav>
       <div class="sidebar-foot">
@@ -92,7 +94,9 @@
       <section id="view-sps" class="view">
         <div class="toolbar">
           <button class="btn primary" id="sps-add">＋ 新增服务主体</button>
-          <span class="muted">用于 ARM 探测与订阅浏览；凭据 AES-GCM 加密落库</span>
+          <button class="btn primary" id="sps-import-json">📋 一键粘贴 JSON</button>
+          <button class="btn ghost" id="sps-sync-all">↻ 同步全部订阅</button>
+          <span class="muted">粘贴 <code>az ad sp create-for-rbac</code> 输出即可自动验真并发现订阅</span>
         </div>
         <div id="sps-list"></div>
       </section>
@@ -108,6 +112,39 @@
         <div id="arm-status" class="muted">选择服务主体后开始浏览。</div>
         <div id="arm-accounts"></div>
         <div id="arm-deployments"></div>
+      </section>
+
+      <!-- 养号打卡 -->
+      <section id="view-warmup" class="view">
+        <div class="toolbar">
+          <button class="btn ghost" id="wu-refresh">↻ 刷新</button>
+          <button class="btn primary" id="wu-bootstrap-all">🪴 一键上架 (全部)</button>
+          <button class="btn primary" id="wu-run-now">▶ 立即打卡</button>
+          <span class="muted" id="wu-summary"></span>
+        </div>
+        <div class="panel">
+          <h2>订阅资产画像</h2>
+          <div id="wu-subs" class="tbl-wrap"></div>
+        </div>
+        <div class="panel">
+          <h2>打卡流水 (warmup_logs)</h2>
+          <div id="wu-logs"></div>
+        </div>
+      </section>
+
+      <!-- 配额与 Tier -->
+      <section id="view-quota" class="view">
+        <div class="toolbar">
+          <label>订阅 <select id="qt-sub"><option value="">加载中…</option></select></label>
+          <label>区域 <input id="qt-location" placeholder="centralus" value="centralus" style="width:130px" /></label>
+          <button class="btn primary" id="qt-load">📡 拉取 Tier 与配额</button>
+          <button class="btn ghost" id="qt-clear">清空</button>
+        </div>
+        <div class="grid-2">
+          <div class="panel"><h2>Tier 状态卡片</h2><div id="qt-tier"></div></div>
+          <div class="panel"><h2>配额水位 (TPM/RPM)</h2><div id="qt-usage"></div></div>
+        </div>
+        <div class="panel"><h2>提档策略</h2><div id="qt-policy" class="muted">选择订阅后点击「拉取」查看详细提档资格与限制。</div></div>
       </section>
 
       <!-- 设置 -->

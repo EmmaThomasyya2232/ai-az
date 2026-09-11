@@ -12,6 +12,9 @@
     keys: [],
     nodes: [],
     sps: [],
+    subs: [],
+    warmupLogs: [],
+    quota: { subs: [], sel: "", tier: null, usage: null },
     arm: { sp: "", sub: "", rg: "", accounts: [], deployments: [], selected: null },
   };
 
@@ -170,6 +173,8 @@
     nodes:    { title: "🖥️ 节点池", load: loadNodes },
     sps:      { title: "🛡️ 服务主体", load: loadSps },
     arm:      { title: "☁️ Azure 资源浏览器", load: initArm },
+    warmup:   { title: "🌱 养号打卡", load: loadWarmup },
+    quota:    { title: "📊 配额与 Tier", load: loadQuota },
     settings: { title: "⚙️ 设置", load: loadSettings },
   };
 
@@ -617,8 +622,72 @@
     });
   }
 
+  /** 一键粘贴 Azure CLI JSON: 自动解析回填 → 验真 → 订阅穿透入库 */
+  function spImportJsonModal() {
+    const m = openModal(`
+      <h3>📋 一键粘贴服务主体 JSON</h3>
+      <p class="muted">粘贴 <code>az ad sp create-for-rbac</code> 输出的标准 JSON，系统将校验凭据并自动发现关联订阅。</p>
+      <div class="form-row"><label>JSON 文本</label>
+        <textarea id="si-json" rows="6" spellcheck="false" placeholder='{\n  "appId": "...",\n  "displayName": "...",\n  "password": "...",\n  "tenant": "..."\n}'></textarea></div>
+      <div class="form-cols">
+        <div class="form-row"><label>自定义 ID (选填)</label><input id="si-id" placeholder="sp-prod" value="" /></div>
+        <div class="form-row"><label>标签 (选填)</label><input id="si-label" placeholder="默认取 displayName" value="" /></div>
+      </div>
+      <div class="form-hint" id="si-msg"></div>
+      <div class="modal-foot">
+        <button class="btn ghost" data-act="cancel">取消</button>
+        <button class="btn primary" data-act="save">验证并导入</button>
+      </div>`);
+    m.addEventListener("click", async (e) => {
+      const act = e.target?.dataset?.act;
+      if (act === "cancel") { closeModal(); return; }
+      if (act !== "save") return;
+      const msg = m.querySelector("#si-msg");
+      const json = m.querySelector("#si-json").value.trim();
+      if (!json) { msg.textContent = "请粘贴 JSON"; msg.style.color = "var(--err)"; return; }
+      const body = {
+        json,
+        id: m.querySelector("#si-id").value.trim() || undefined,
+        label: m.querySelector("#si-label").value.trim() || undefined,
+      };
+      msg.textContent = "验真中… (OAuth2 + 订阅穿透)"; msg.style.color = "var(--muted)";
+      const btn = m.querySelector('[data-act="save"]');
+      btn.disabled = true;
+      try {
+        const r = await api("/admin/sps/import", { method: "POST", body });
+        closeModal();
+        toast(`已导入 ${r.label || r.sp}，发现 ${r.subCount} 个订阅 ✓`);
+        loadSps();
+        if (state.view === "warmup") loadWarmup();
+        if (state.view === "quota") loadQuota();
+      } catch (err) {
+        msg.textContent = err.message;
+        msg.style.color = "var(--err)";
+        btn.disabled = false;
+      }
+    });
+  }
+
+  /** 同步全部服务主体 → 订阅图片入库 */
+  async function syncAllSubs() {
+    if (!state.sps.length) { toast("暂无服务主体可同步", "err"); return; }
+    if (!(await confirmDialog("重新拉取全部服务主体名下的订阅并更新画像？", { danger: false, okText: "同步" }))) return;
+    let count = 0;
+    try {
+      for (const sp of state.sps) {
+        const r = await api(`/admin/subs/sync/${encodeURIComponent(sp.id)}`, { method: "POST" });
+        count += r.subCount ?? 0;
+      }
+      toast(`同步完成：共 ${count} 个订阅`);
+      if (state.view === "warmup") loadWarmup();
+      if (state.view === "quota") loadQuota();
+    } catch (e) { toast(e.message, "err"); }
+  }
+
   function wireSps() {
     $("#sps-add").addEventListener("click", () => spFormModal(null));
+    $("#sps-import-json").addEventListener("click", () => spImportJsonModal());
+    $("#sps-sync-all").addEventListener("click", () => syncAllSubs());
     $("#sps-list").addEventListener("click", async (e) => {
       const btn = e.target.closest("button[data-sact]");
       if (!btn) return;
@@ -744,6 +813,7 @@
           </div>
           <div>
             <button class="btn sm primary" data-aact="dep" data-acc="${esc(a.name)}" data-rg="${esc(accRg(a))}">查看部署</button>
+            <button class="btn sm ghost" data-aact="warmup" data-acc="${esc(a.name)}" data-rg="${esc(accRg(a))}">🌱 初始化养号</button>
           </div>
         </div>`).join("")
       : `<div class="empty">该资源组下没有账户</div>`) + `</div>`;
@@ -756,7 +826,35 @@
       const acc = (state.arm.accounts ?? []).find((a) => a.name === btn.dataset.acc);
       if (!acc) return;
       if (btn.dataset.aact === "dep") loadDeployments(acc, btn.dataset.rg);
+      if (btn.dataset.aact === "warmup") armWarmupAccount(btn.dataset.rg);
     });
+  }
+
+  /** ARM 页: 对当前选中订阅一键初始化养号 (模块3: 资源页提供一键按钮) */
+  async function armWarmupAccount(rg) {
+    const subId = state.arm.sub;
+    if (!subId) { toast("请先选择订阅", "err"); return; }
+    let sub = (state.subs ?? []).find((x) => x.id === subId);
+    if (!sub) {
+      // 从 /admin/subs 拉取画像 (可能尚未同步)
+      try {
+        const data = await api("/admin/subs");
+        state.subs = data.subs ?? [];
+        sub = state.subs.find((x) => x.id === subId);
+      } catch (e) { toast(e.message, "err"); return; }
+    }
+    if (!sub) {
+      toast("该订阅还没有画像，请先在「🛡️ 服务主体」页同步订阅", "err");
+      return;
+    }
+    const picked = await pickRegion(sub);
+    if (picked === false) return;
+    toast(`正在上架 ${picked ? `(${picked})` : ""} …`, "ok", 30000);
+    try {
+      const r = await runBootstrap(sub, picked || undefined);
+      toast(`上架成功：${r.result.message}${picked ? ` (${picked})` : ""}`);
+      loadWarmup();
+    } catch (e) { toast(e.message, "err"); }
   }
 
   async function loadDeployments(acc, rg) {
@@ -811,6 +909,206 @@
     toast(apiKey ? "已获取账户密钥，请确认后保存" : "无法自动获取密钥 (权限不足)，请手动粘贴", apiKey ? "ok" : "err");
   }
 
+  // ---------- 养号打卡 (阶段六) ----------
+
+  const warmupBadge = (s) => {
+    switch (s ?? "Pending") {
+      case "Active": return '<span class="badge on">Active · 打卡中</span>';
+      case "Upgraded": return '<span class="badge info">Upgraded · 已提档</span>';
+      case "Disabled": return '<span class="badge off">已停用</span>';
+      default: return '<span class="badge warn">Pending · 未上架</span>';
+    }
+  };
+
+  const tierTag = (t) => {
+    const tier = t ?? "Unknown";
+    if (/free/i.test(tier)) return `<span class="badge warn">Free Tier</span>`;
+    return `<span class="badge on">${esc(tier)}</span>`;
+  };
+
+  const regionChips = (regions) =>
+    (regions ?? []).length
+      ? regions.map((r) => `<span class="badge info">${esc(r)}</span>`).join(" ")
+      : '<span class="muted">未探测</span>';
+
+  const subRow = (s) => `
+    <tr>
+      <td><b>${esc(s.name || s.id)}</b><div class="sub mono">${esc(s.id)}</div></td>
+      <td class="mono">${esc(s.spId)}</td>
+      <td>${tierTag(s.currentTier)}</td>
+      <td>${regionChips(s.allowedRegions)}</td>
+      <td>${warmupBadge(s.warmupStatus)}</td>
+      <td>${s.warmupTarget ? '<span class="badge on">已上架</span>' : '<span class="badge off">未上架</span>'}</td>
+      <td class="actions">
+        <button class="btn sm ghost" data-wact="probe" data-id="${esc(s.id)}">🌐 探测区域</button>
+        ${s.warmupStatus !== "Active" && s.warmupStatus !== "Upgraded"
+          ? `<button class="btn sm primary" data-wact="bootstrap" data-id="${esc(s.id)}">🪴 一键上架</button>` : ""}
+        <button class="btn sm ghost" data-wact="tier" data-id="${esc(s.id)}">📊 看 Tier</button>
+        <button class="btn sm danger" data-wact="del" data-id="${esc(s.id)}">删除</button>
+      </td>
+    </tr>`;
+
+  async function loadWarmup() {
+    const el = $("#wu-subs");
+    if (requireTokenNotice(el)) return;
+    let data, logs;
+    try {
+      [data, logs] = await Promise.all([
+        api("/admin/subs"),
+        api("/admin/warmup/logs?limit=50").catch(() => ({ logs: [] })),
+      ]);
+    } catch (e) { renderError(el, e); return; }
+    state.subs = data.subs ?? [];
+    state.warmupLogs = logs.logs ?? [];
+    const s = state.subs;
+    const active = s.filter((x) => x.warmupStatus === "Active").length;
+    $("#wu-summary").textContent = `共 ${s.length} 个订阅 · 打卡中 ${active} · 已提档 ${s.filter((x) => x.warmupStatus === "Upgraded").length}`;
+    el.innerHTML = s.length ? `<table class="tbl">
+      <thead><tr><th>订阅</th><th>服务主体</th><th>Tier</th><th>合规区域</th><th>打卡状态</th><th>上架</th><th></th></tr></thead>
+      <tbody>${s.map(subRow).join("")}</tbody></table>`
+      : `<div class="empty">还没有订阅画像。先在「🛡️ 服务主体」页一键粘贴 JSON 导入，或点击「服务主体」页的「↻ 同步全部订阅」。</div>`;
+    renderWarmupLogs();
+  }
+
+  function warmupLogRow(l) {
+    const ok = l.result_status === "Success";
+    return `
+      <tr>
+        <td class="mono">${shortTime(l.created_at)}</td>
+        <td class="mono">${esc(l.subscription_id)}</td>
+        <td>${esc(l.instance_name)}</td>
+        <td><span class="badge info">${esc(l.model_name)}</span></td>
+        <td>${l.tokens_consumed ?? 0}</td>
+        <td class="mono ${ok ? "st2" : "st5"}">${l.status_code ?? "—"}</td>
+        <td>${fmtMs(l.response_time_ms)}</td>
+        <td>${ok ? '<span class="badge on">Success</span>' : '<span class="badge off">Failed</span>'}</td>
+        <td class="cell-err" title="${esc(l.error ?? "")}">${esc(l.error ?? "")}</td>
+      </tr>`;
+  }
+
+  function renderWarmupLogs() {
+    const el = $("#wu-logs");
+    const logs = state.warmupLogs;
+    el.innerHTML = logs.length ? `<div class="tbl-wrap"><table class="tbl">
+      <thead><tr><th>时间</th><th>订阅</th><th>实例</th><th>模型</th><th>Tokens</th><th>状态码</th><th>延迟</th><th>结果</th><th>错误</th></tr></thead>
+      <tbody>${logs.map(warmupLogRow).join("")}</tbody></table></div>`
+      : `<div class="empty">暂无打卡流水。</div>`;
+  }
+
+async function runBootstrap(sub, chosenRegion) {
+    const opts = {};
+    if (chosenRegion) opts.location = chosenRegion;
+    return api(`/admin/subs/${encodeURIComponent(sub.id)}/bootstrap`, { method: "POST", body: opts });
+  }
+
+  async function bootstrapOne(sub) {
+    const regions = sub.allowedRegions ?? [];
+    if (!regions.length) {
+      const go = await confirmDialog("该订阅尚无区域白名单。是否先自动探测合规区域？", { danger: false, okText: "先探测" });
+      if (!go) return;
+      try {
+        const r = await api(`/admin/subs/${encodeURIComponent(sub.id)}/probe`, { method: "POST" });
+        const found = r.allowedRegions ?? [];
+        toast(found.length ? `探测到 ${found.length} 个合规区域：${found.join(", ")}` : "未探测到合规区域，将使用默认区域", found.length ? "ok" : "err");
+        if (found.length) sub.allowedRegions = found;
+      } catch (e) { toast(e.message, "err"); return; }
+    }
+    const picked = await pickRegion(sub);
+    if (picked === false) return;
+    try {
+      const r = await runBootstrap(sub, picked || undefined);
+      toast(picked ? `上架成功：${r.result.message} (${picked})` : `上架成功：${r.result.message}`);
+      loadWarmup();
+    } catch (e) { toast(e.message, "err"); }
+  }
+
+  /** 若存在白名单, 弹出区域选择; 返回所选区域 | null(直接用默认区域) | false(取消) */
+  async function pickRegion(sub) {
+    const regions = sub.allowedRegions ?? [];
+    if (!regions.length) return null;
+    return new Promise((resolve) => {
+      const m = openModal(`<h3>🪴 一键上架 · ${esc(sub.id)}</h3>
+        <div class="form-row"><label>选择部署区域 (来自探测白名单)</label>
+          <select id="bs-loc">${regions.map((r) => `<option value="${esc(r)}">${esc(r)}</option>`).join("")}</select></div>
+        <div class="modal-foot">
+          <button class="btn ghost" data-act="cancel">取消</button>
+          <button class="btn primary" data-act="ok">上架</button></div>`);
+      m.addEventListener("click", (e) => {
+        const act = e.target?.dataset?.act;
+        if (act === "cancel") { closeModal(); resolve(false); }
+        if (act === "ok") { const v = m.querySelector("#bs-loc")?.value; closeModal(); resolve(v || null); }
+      });
+    });
+  }
+
+  async function runWarmupNow() {
+    toast("立即打卡中… (每日 Cron 任务可随时手动触发)", "ok", 8000);
+    try {
+      const r = await api("/admin/warmup/run", { method: "POST" });
+      const s = r.summary || {};
+      toast(`打卡完成：成功 ${s.ok} / 失败 ${s.failures} / 跳过 ${s.skipped}，提档 ${(s.upgraded ?? []).length}`, s.failures ? "err" : "ok");
+      loadWarmup();
+      if (state.view === "quota") loadQuota();
+    } catch (e) { toast(e.message, "err"); }
+  }
+
+  function wireWarmup() {
+    $("#wu-refresh").addEventListener("click", () => loadWarmup());
+    $("#wu-run-now").addEventListener("click", () => runWarmupNow());
+    $("#wu-bootstrap-all").addEventListener("click", async () => {
+      const pend = state.subs.filter((s) => s.warmupStatus !== "Active" && s.warmupStatus !== "Upgraded");
+      if (!pend.length) { toast("没有待上架的订阅"); return; }
+      if (!(await confirmDialog(`对 ${pend.length} 个待上架订阅执行一键上架？将创建 AIServices 资源。`, { danger: true, okText: "全部上架" }))) return;
+      toast(`开始上架 ${pend.length} 个订阅…`, "ok", 10000);
+      let ok = 0;
+      for (const sub of pend) {
+        try {
+          await runBootstrap(sub, null);
+          ok++;
+        } catch (e) { toast(`上架失败 ${sub.id}: ${e.message}`, "err"); }
+      }
+      toast(`完成：上架 ${ok}/${pend.length}`);
+      loadWarmup();
+    });
+    $("#wu-subs").addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-wact]");
+      if (!btn) return;
+      const id = btn.dataset.id;
+      const sub = state.subs.find((x) => x.id === id);
+      if (!sub) return;
+      const act = btn.dataset.wact;
+      if (act === "probe") {
+        toast("正在探测合规区域…", "ok", 10000);
+        try {
+          const r = await api(`/admin/subs/${encodeURIComponent(id)}/probe`, { method: "POST" });
+          const found = r.allowedRegions ?? [];
+          toast(found.length ? `探测到 ${found.length} 个合规区域：${found.join(", ")}` : "未探测到合规区域", found.length ? "ok" : "err");
+          loadWarmup();
+        } catch (err) { toast(err.message, "err"); }
+      }
+      if (act === "bootstrap") bootstrapOne(sub);
+      if (act === "tier") await viewTierModal(id);
+      if (act === "del") {
+        if (!(await confirmDialog(`删除订阅画像「${id}」？（不影响 Azure 资源）`))) return;
+        try { await api(`/admin/subs/${encodeURIComponent(id)}`, { method: "DELETE" }); toast("已删除"); loadWarmup(); }
+        catch (err) { toast(err.message, "err"); }
+      }
+    });
+  }
+
+  async function viewTierModal(id) {
+    try {
+      const r = await api(`/admin/subs/${encodeURIComponent(id)}/tier`);
+      const t = r.tier || {};
+      openModal(`<h3>📊 Tier 状态 · ${esc(id)}</h3><div class="kv">
+        <div class="k">当前 Tier</div><div>${tierTag(t.currentTierName)}</div>
+        <div class="k">分配时间</div><div class="mono">${esc(t.assignedTime ?? "—")}</div>
+        <div class="k">不可升级原因</div><div>${esc(t.upgradeUnavailabilityReason ?? "—")}</div>
+        <div class="k">提档策略</div><div class="mono" style="white-space:pre-wrap">${esc(JSON.stringify(t.tierUpgradePolicy ?? {}, null, 2))}</div></div>
+        <div class="modal-foot"><button class="btn primary" data-act="close">好的</button></div>`)
+        .addEventListener("click", (ev) => { if (ev.target?.dataset?.act === "close") closeModal(); });
+    } catch (err) { toast(err.message, "err"); }
+  }
   // ---------- 设置 ----------
   async function loadSettings() {
     const healthEl = $("#set-health");
@@ -840,6 +1138,97 @@ curl ${location.origin}/v1/chat/completions \\
   }
 
   // ---------- 阶段五: 面板手动巡检 ----------
+// ---------- 配额与 Tier (阶段六) ----------
+
+  async function loadQuota() {
+    const el = $("#qt-sub");
+    if (requireTokenNotice($("#qt-tier"))) return;
+    try {
+      const data = await api("/admin/subs");
+      state.quota.subs = data.subs ?? [];
+    } catch (e) { renderError($("#qt-tier"), e); return; }
+    const sel = state.quota.sel;
+    el.innerHTML = state.quota.subs.length
+      ? state.quota.subs.map((s) => `<option value="${esc(s.id)}" ${s.id === sel ? "selected" : ""}>${esc(s.name || s.id)}</option>`).join("")
+      : `<option value="">— 请先导入订阅 —</option>`;
+    state.quota.sel = el.value;
+  }
+
+  function qtyTable(tier, usage) {
+    const mk = (v) => (v == null ? "—" : v);
+    const rows = (usage?.items ?? []).map((it) => {
+      const cur = it.currentValue ?? 0;
+      const lim = it.limit ?? 0;
+      const pct = lim ? Math.min(100, Math.round((cur / lim) * 100)) : 0;
+      return `<tr>
+        <td>${esc(it.name ?? "—")}</td>
+        <td class="mono">${fmtInt(cur)}</td>
+        <td class="mono">${fmtInt(lim)}</td>
+        <td>${esc(it.unit ?? "—")}</td>
+        <td>
+          <div class="meter"><div class="meter-fill" style="width:${pct}%"></div></div>
+          <span class="muted">${pct}%</span>
+        </td></tr>`;
+    }).join("");
+    return `
+      <div class="kv">
+        <div class="k">当前 Tier</div><div>${tierTag(tier?.currentTierName ?? "Unknown")}</div>
+        <div class="k">分配时间</div><div class="mono">${esc(mk(tier?.assignedTime))}</div>
+        <div class="k">检查时间</div><div class="mono">${shortTime(new Date().toISOString())}</div>
+        <div class="k">不可升级原因</div><div>${esc(mk(tier?.upgradeUnavailabilityReason))}</div>
+      </div>
+      <div class="panel" style="margin-top:14px">
+        <h2>配额水位 ${usage ? `· ${esc(usage.location)}` : ""}</h2>
+        <div class="tbl-wrap"><table class="tbl">
+          <thead><tr><th>指标</th><th>当前</th><th>限额</th><th>单位</th><th>使用率</th></tr></thead>
+          <tbody>${rows ? rows : '<tr><td colspan="5" class="muted">该区域暂无配额数据</td></tr>'}</tbody></table></div>
+      </div>`;
+  }
+
+  function renderQuota(tier, usage) {
+    const tierEl = $("#qt-tier");
+    const usageEl = $("#qt-usage");
+    if (!tier) {
+      tierEl.innerHTML = '<div class="empty">尚无数据，点击「📡 拉取 Tier 与配额」</div>';
+      usageEl.innerHTML = "";
+    } else {
+      tierEl.innerHTML = qtyTable(tier, usage);
+      usageEl.innerHTML = "";
+    }
+  }
+
+  function wireQuota() {
+    $("#qt-sub").addEventListener("change", () => { state.quota.sel = $("#qt-sub").value; });
+    $("#qt-load").addEventListener("click", async () => {
+      const id = $("#qt-sub").value;
+      const loc = $("#qt-location").value.trim() || "centralus";
+      if (!id) { toast("请先选择订阅", "err"); return; }
+      $("#qt-tier").innerHTML = '<div class="muted"><span class="spin">◌</span> 拉取中…</div>';
+      try {
+        const tierR = await api(`/admin/subs/${encodeURIComponent(id)}/tier`).catch(() => null);
+        const usageR = await api(`/admin/subs/${encodeURIComponent(id)}/usage-snapshot?location=${encodeURIComponent(loc)}`).catch(() => null);
+        renderQuota(tierR?.tier ?? null, usageR?.snapshot ?? null);
+        const pol = tierR?.tier?.tierUpgradePolicy;
+        const tEl = $("#qt-policy");
+        tEl.className = "";
+        tEl.innerHTML = `<div class="kv">
+          <div class="k">currentTierName</div><div>${esc(tierR?.tier?.currentTierName ?? "—")}</div>
+          <div class="k">upgradeUnavailabilityReason</div><div>${esc(tierR?.tier?.upgradeUnavailabilityReason ?? "—")}</div>
+          <div class="k">tierUpgradePolicy</div><div class="mono" style="white-space:pre-wrap">${esc(JSON.stringify(pol ?? {}, null, 2))}</div></div>`;
+        toast(usageR ? `已拉取 ${loc} 配额 (${(usageR.snapshot?.items ?? []).length} 项)` : "Tier 拉取成功，配额不可用", usageR ? "ok" : "err");
+      } catch (e) {
+        $("#qt-tier").innerHTML = "";
+        renderError($("#qt-tier"), e);
+      }
+    });
+    $("#qt-clear").addEventListener("click", () => {
+      state.quota.tier = null;
+      state.quota.usage = null;
+      renderQuota(null, null);
+      $("#qt-policy").className = "muted";
+      $("#qt-policy").textContent = "选择订阅后点击「拉取」查看详细提档资格与限制。";
+    });
+  }
   async function runPatrolNow() {
     const out = $("#set-patrol-out");
     out.style.display = "block";
@@ -868,6 +1257,8 @@ curl ${location.origin}/v1/chat/completions \\
     wireNodes();
     wireSps();
     wireArmAccounts();
+    wireWarmup();
+    wireQuota();
     $("#set-patrol-run").addEventListener("click", runPatrolNow);
 
     window.addEventListener("hashchange", () => {

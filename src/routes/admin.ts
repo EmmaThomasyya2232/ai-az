@@ -50,6 +50,33 @@ import {
   breakerCooldownSec,
 } from "../core/breaker";
 import { runPatrol } from "../core/patrol";
+import {
+  parseSpPasteJson,
+  slugIdFromDisplayName,
+} from "../core/sp";
+import {
+  listSubsFromD1,
+  getSubFromD1,
+  upsertSub,
+  patchSubState,
+  deleteSubFromD1,
+  syncSubscriptionsFromArm,
+  isWarmupStatus,
+  type SubRecord,
+} from "../core/subs";
+import { discoverAllowedRegions } from "../core/regions";
+import {
+  bootstrapWarmup,
+  runDailyWarmup,
+  fetchTierStatus,
+  fetchUsageSnapshot,
+} from "../core/warmup";
+import {
+  getSystemConfig,
+  setSystemConfig,
+  deleteSystemConfig,
+  listSystemConfigs,
+} from "../core/config-store";
 
 
 export const admin = new Hono<{ Bindings: Env }>();
@@ -600,4 +627,322 @@ admin.post("/patrol", async (c) => {
   return c.json({ ok: true, summary });
 });
 
+// ---------- 模块 1: 服务主体 JSON 粘贴录入 + 订阅自动发现 (阶段六) ----------
 
+admin.use("/sps/import", requireAdminToken);
+
+/** 一键粘贴 Azure CLI JSON: 验真 + 订阅穿透 + 入库 (亦暴露于 POST /api/service-principals) */
+export const importServicePrincipalHandler: (c: Context<{ Bindings: Env }>) => Promise<Response> = async (c) => {
+  if (!c.env.DB) return dbNotConfigured(c);
+  const body = await readJsonBody(c);
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return invalid(c, 400, "Request body must be a JSON object");
+  }
+  const b = body as Record<string, unknown>;
+  const rawJson = typeof b.json === "string" ? b.json : "";
+  const customId = typeof b.id === "string" ? b.id.trim() : "";
+  const customLabel = typeof b.label === "string" ? b.label.trim() : "";
+
+  const parsed = parseSpPasteJson(rawJson);
+  if (!parsed.ok) return invalid(c, 400, parsed.message);
+
+  // 验真: 拿一次管理令牌 (OAuth2 client_credentials), 失败则凭据无效
+  const sp: SpRecord = {
+    id: customId || slugIdFromDisplayName(parsed.input.displayName ?? ""),
+    tenantId: parsed.input.tenantId,
+    clientId: parsed.input.clientId,
+    clientSecret: parsed.input.clientSecret,
+    label: customLabel || parsed.input.displayName || undefined,
+  };
+  try {
+    const t = await getAccessToken(c.env, {
+      tenantId: sp.tenantId,
+      clientId: sp.clientId,
+      clientSecret: sp.clientSecret,
+      scope: armScope(c.env),
+    });
+    if (!t.token) throw new Error("empty token");
+  } catch (e) {
+    return invalid(
+      c,
+      401,
+      `凭据验证失败 (OAuth2): ${e instanceof Error ? e.message : String(e)}`
+    );
+  }
+
+  // 入库 (UPSERT, 幂等)
+  await upsertSp(c.env, sp);
+  // 订阅穿透: ARM /subscriptions 动态拉取并入库
+  let subs: SubRecord[] = [];
+  try {
+    subs = await syncSubscriptionsFromArm(c.env, sp);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return invalid(c, 502, `订阅穿透失败: ${msg}`);
+  }
+  return c.json(
+    {
+      ok: true,
+      sp: sp.id,
+      label: sp.label ?? null,
+      subsDiscovered: subs.map((s) => ({ id: s.id, name: s.name })),
+      subCount: subs.length,
+    },
+    201
+  );
+};
+
+admin.post("/sps/import", importServicePrincipalHandler);
+
+// ---------- 订阅资产管理 (阶段六) ----------
+
+admin.use("/subs", requireAdminToken);
+admin.use("/subs/*", requireAdminToken);
+
+function toSubPublic(s: SubRecord) {
+  return s;
+}
+
+/** 列出全部已入库订阅画像 (亦暴露于 GET /api/subscriptions) */
+export const listSubsHandler: (c: Context<{ Bindings: Env }>) => Promise<Response> = async (c) => {
+  if (!c.env.DB) return dbNotConfigured(c);
+  const list = (await listSubsFromD1(c.env)) ?? [];
+  return c.json({ ok: true, count: list.length, subs: list.map(toSubPublic) });
+};
+
+admin.get("/subs", listSubsHandler);
+
+/** 手动同步某服务主体的订阅 → 全量入库 */
+admin.post("/subs/sync/:spId", async (c) => {
+  if (!c.env.DB) return dbNotConfigured(c);
+  const sp = await getSpFromD1(c.env, c.req.param("spId"));
+  if (!sp) return invalid(c, 404, `Service principal '${c.req.param("spId")}' not found`);
+  try {
+    const subs = await syncSubscriptionsFromArm(c.env, sp);
+    return c.json({ ok: true, sp: sp.id, subCount: subs.length, subs: subs.map(toSubPublic) });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return invalid(c, 502, `订阅穿透失败: ${msg}`);
+  }
+});
+
+function parseAllowedRegions(v: unknown): string[] | null | undefined {
+  if (v === undefined) return undefined;
+  if (v === null) return null;
+  if (!Array.isArray(v)) return undefined;
+  const arr: string[] = [];
+  for (const x of v) {
+    if (typeof x === "string" && /^[a-z0-9-]+$/.test(x.trim())) arr.push(x.trim());
+  }
+  return arr;
+}
+
+/** 更新订阅画像 (名称 / 区域白名单 / 打卡状态手动覆盖) */
+admin.patch("/subs/:id", async (c) => {
+  if (!c.env.DB) return dbNotConfigured(c);
+  const id = c.req.param("id");
+  const cur = await getSubFromD1(c.env, id);
+  if (!cur) return invalid(c, 404, `Subscription '${id}' not found`);
+  const body = await readJsonBody(c);
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return invalid(c, 400, "Request body must be a JSON object");
+  }
+  const b = body as Record<string, unknown>;
+  const patch: Partial<SubRecord> = {};
+  if (b.name !== undefined) {
+    if (typeof b.name !== "string" || b.name.length > 256) {
+      return invalid(c, 400, "`name` must be a string (max 256)");
+    }
+    patch.name = b.name.trim();
+  }
+  if (b.allowedRegions !== undefined) {
+    const regions = parseAllowedRegions(b.allowedRegions);
+    if (regions === undefined) return invalid(c, 400, "`allowedRegions` must be a string array or null");
+    patch.allowedRegions = regions;
+  }
+  if (b.warmupStatus !== undefined) {
+    if (!isWarmupStatus(b.warmupStatus)) {
+      return invalid(c, 400, "`warmupStatus` must be Pending/Active/Upgraded/Disabled");
+    }
+    patch.warmupStatus = b.warmupStatus;
+  }
+  await upsertSub(c.env, { ...cur, ...patch });
+  const updated = await getSubFromD1(c.env, id);
+  return c.json({ ok: true, sub: updated ? toSubPublic(updated) : null });
+});
+
+/** 删除订阅画像 (不删除 Azure 资源, 仅移除本控制器记录) */
+admin.delete("/subs/:id", async (c) => {
+  if (!c.env.DB) return dbNotConfigured(c);
+  const id = c.req.param("id");
+  const existed = await deleteSubFromD1(c.env, id);
+  if (!existed) return invalid(c, 404, `Subscription '${id}' not found`);
+  return c.json({ ok: true, deleted: id });
+});
+
+
+
+// ---------- 模块 2&3: 区域白名单探测 + 一键上架 + 打卡 (阶段六) ----------
+
+/** 探测订阅可用区域白名单 (策略解析 + 探针回退), 落库 */
+admin.post("/subs/:id/probe", async (c) => {
+  if (!c.env.DB) return dbNotConfigured(c);
+  const id = c.req.param("id");
+  const sub = await getSubFromD1(c.env, id);
+  if (!sub) return invalid(c, 404, `Subscription '${id}' not found`);
+  const sp = await getSpFromD1(c.env, sub.spId);
+  if (!sp) return invalid(c, 404, `Service principal '${sub.spId}' not found`);
+  try {
+    const regions = await discoverAllowedRegions(c.env, sp, sub.id);
+    await patchSubState(c.env, sub.id, { allowedRegions: regions ?? null });
+    return c.json({
+      ok: true,
+      subscriptionId: id,
+      allowedRegions: regions ?? [],
+      discovered: (regions ?? []).length > 0,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return invalid(c, 502, `区域探测失败: ${msg}`);
+  }
+});
+
+/** 读取订阅 Tier 状态 (QuotaTiers) */
+admin.get("/subs/:id/tier", async (c) => {
+  if (!c.env.DB) return dbNotConfigured(c);
+  const id = c.req.param("id");
+  const sub = await getSubFromD1(c.env, id);
+  if (!sub) return invalid(c, 404, `Subscription '${id}' not found`);
+  const sp = await getSpFromD1(c.env, sub.spId);
+  if (!sp) return invalid(c, 404, `Service principal '${sub.spId}' not found`);
+  try {
+    const tier = await fetchTierStatus(c.env, sp, sub.id);
+    if (tier) {
+      await patchSubState(c.env, sub.id, {
+        currentTier: tier.currentTierName ?? sub.currentTier,
+        upgradeUnavailabilityReason: tier.upgradeUnavailabilityReason,
+        lastTierCheckedAt: new Date().toISOString(),
+      });
+    }
+    return c.json({ ok: true, subscriptionId: id, tier });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return invalid(c, 502, `Tier 读取失败: ${msg}`);
+  }
+});
+
+/** 读取订阅指定区域配额水位 (CognitiveServices Usage) */
+admin.get("/subs/:id/usage-snapshot", async (c) => {
+  if (!c.env.DB) return dbNotConfigured(c);
+  const id = c.req.param("id");
+  const sub = await getSubFromD1(c.env, id);
+  if (!sub) return invalid(c, 404, `Subscription '${id}' not found`);
+  const sp = await getSpFromD1(c.env, sub.spId);
+  if (!sp) return invalid(c, 404, `Service principal '${sub.spId}' not found`);
+  const location = c.req.query("location") || "centralus";
+  try {
+    const snap = await fetchUsageSnapshot(c.env, sp, sub.id, location);
+    if (!snap) return invalid(c, 502, "配额水位读取失败 (检查区域/权限)");
+    return c.json({ ok: true, subscriptionId: id, snapshot: snap });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return invalid(c, 502, `配额读取失败: ${msg}`);
+  }
+});
+
+/** 一键安全上架 (safe-bootstrap): RG + AIServices + Embedding 部署 + 首发微调用 (亦暴露于 POST /api/subscriptions/:id/safe-bootstrap) */
+export const bootstrapHandler: (c: Context<{ Bindings: Env }>) => Promise<Response> = async (c) => {
+  if (!c.env.DB) return dbNotConfigured(c);
+  const id = c.req.param("id");
+  if (!id) return invalid(c, 400, "Missing subscription id");
+  const sub = await getSubFromD1(c.env, id);
+  if (!sub) return invalid(c, 404, `Subscription '${id}' not found`);
+  const sp = await getSpFromD1(c.env, sub.spId);
+  if (!sp) return invalid(c, 404, `Service principal '${sub.spId}' not found`);
+  const body = (await readJsonBody(c)) as Record<string, unknown> | null;
+  const pickMe = (k: string, max: number) => {
+    const v = body?.[k];
+    return typeof v === "string" && v.trim() !== "" && v.length <= max ? v.trim() : undefined;
+  };
+  const location = pickMe("location", 64);
+  const model = pickMe("model", 128);
+  try {
+    const result = await bootstrapWarmup(c.env, sub, sp, { location, model });
+    if (result.status === "failed") {
+      return c.json({ ok: false, result }, 400);
+    }
+    return c.json({ ok: true, result });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return invalid(c, 502, `一键上架失败: ${msg}`);
+  }
+};
+
+admin.post("/subs/:id/bootstrap", bootstrapHandler);
+
+/** 手动触发一次每日打卡 (排障 / 验收用) */
+admin.post("/warmup/run", async (c) => {
+  const summary = await runDailyWarmup(c.env, "manual");
+  return c.json({ ok: true, summary });
+});
+
+/** 每次打卡流水日志 */
+admin.get("/warmup/logs", async (c) => {
+  if (!c.env.DB) return dbNotConfigured(c);
+  const limitRaw = Number(c.req.query("limit") ?? "50");
+  const limit = Number.isInteger(limitRaw) && limitRaw > 0 ? limitRaw : 50;
+  const subId = c.req.query("sub") || undefined;
+  try {
+    let rows: Array<Record<string, unknown>>;
+    if (subId) {
+      rows = (
+        await c.env.DB.prepare(
+          `SELECT id, subscription_id, instance_name, model_name, tokens_consumed, status_code,
+                  response_time_ms, result_status, error, created_at
+           FROM warmup_logs WHERE subscription_id = ?1 ORDER BY created_at DESC LIMIT ?2`
+        ).bind(subId, limit).all()
+      ).results ?? [];
+    } else {
+      rows = (
+        await c.env.DB.prepare(
+          `SELECT id, subscription_id, instance_name, model_name, tokens_consumed, status_code,
+                  response_time_ms, result_status, error, created_at
+           FROM warmup_logs ORDER BY created_at DESC LIMIT ?1`
+        ).bind(limit).all()
+      ).results ?? [];
+    }
+    return c.json({ ok: true, logs: rows });
+  } catch (e) {
+    return invalid(c, 500, e instanceof Error ? e.message : String(e));
+  }
+});
+
+// ---------- 系统配置 (阶段六: system_configs 动态覆盖 + 快速查看) ----------
+
+admin.get("/config", async (c) => {
+  const rows = await listSystemConfigs(c.env);
+  return c.json({ ok: true, configs: rows });
+});
+
+admin.put("/config/:key", async (c) => {
+  if (!c.env.DB) return dbNotConfigured(c);
+  const key = c.req.param("key");
+  if (!/^[a-z0-9_.-]+$/.test(key)) return invalid(c, 400, "Invalid config key");
+  const body = await readJsonBody(c);
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return invalid(c, 400, "Request body must be a JSON object");
+  }
+  const value = (body as Record<string, unknown>).value;
+  if (typeof value !== "string") return invalid(c, 400, "`value` must be a string");
+  await setSystemConfig(c.env, key, value);
+  const updated = await getSystemConfig(c.env, key);
+  return c.json({ ok: true, key, value: updated });
+});
+
+admin.delete("/config/:key", async (c) => {
+  if (!c.env.DB) return dbNotConfigured(c);
+  const key = c.req.param("key");
+  if (!/^[a-z0-9_.-]+$/.test(key)) return invalid(c, 400, "Invalid config key");
+  const deleted = await deleteSystemConfig(c.env, key);
+  return c.json({ ok: true, key, deleted });
+});

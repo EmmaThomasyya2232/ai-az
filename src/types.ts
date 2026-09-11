@@ -62,5 +62,15 @@ export interface Env {
   CRON_CLEANUP_LOGS?: string;
   /** 阶段五: 令牌预热窗口秒数, 剩余有效期小于该值即提前刷新, 默认 1800 */
   TOKEN_PREWARM_WINDOW_SEC?: string;
+  /** 阶段六: 每日养号打卡调度开关, 'off' 关闭 (默认开, 依赖 DB 绑定) */
+  CRON_WARMUP?: string;
+  /** 阶段六: 养号默认合规区域, 探测失败/无策略时回退, 默认 centralus */
+  WARMUP_DEFAULT_REGION?: string;
+  /** 阶段六: 养号默认部署模型, 默认 text-embedding-3-small */
+  WARMUP_MODEL?: string;
+  /** 阶段六: AIServices 账户 SKU, 默认 S0 */
+  WARMUP_SKU_NAME?: string;
+  /** 阶段六: 打卡消耗 tokens 上限, 默认 32 (极端情况下防失控) */
+  WARMUP_MAX_TOKENS?: string;
 }
 

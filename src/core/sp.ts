@@ -154,3 +154,53 @@ export function validateSpInput(
 
   return { ok: true, value };
 }
+
+// ---------- 服务主体 JSON 一键粘贴 (阶段一: Azure CLI az ad sp create-for-rbac JSON) ----------
+
+/**
+ * 解析 Azure CLI `az ad sp create-for-rbac` 生成的 JSON:
+ *   { "appId": "...", "displayName": "...", "password": "...", "tenant": "..." }
+ * 同时兼容别名: clientId == appId, clientSecret == password, tenantId == tenant。
+ * 返回可校验前的规范化输入; 缺少必填字段即失败。
+ */
+export function parseSpPasteJson(
+  rawText: string
+): { ok: true; input: { tenantId: string; clientId: string; clientSecret: string; displayName?: string } } | { ok: false; message: string } {
+  const text = (rawText ?? "").trim();
+  if (!text) {
+    return { ok: false, message: "请粘贴 Azure CLI 生成的服务主体 JSON" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: false, message: "JSON 解析失败, 请粘贴完整标准格式" };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, message: "粘贴内容必须是 JSON 对象" };
+  }
+  const b = parsed as Record<string, unknown>;
+  const tenantId = requireNonEmpty(b.tenant ?? b.tenantId, "tenant", 128);
+  const clientId = requireNonEmpty(b.appId ?? b.clientId, "appId", 128);
+  const clientSecret = requireNonEmpty(b.password ?? b.clientSecret, "password", 1024);
+  if (!tenantId || !clientId || !clientSecret) {
+    return {
+      ok: false,
+      message: "缺少必填字段: 需要 appId / password / tenant (或 clientId / clientSecret / tenantId)",
+    };
+  }
+  const displayName =
+    typeof b.displayName === "string" && b.displayName.trim() !== "" ? b.displayName.trim().slice(0, 128) : undefined;
+  return { ok: true, input: { tenantId, clientId, clientSecret, displayName } };
+}
+
+/** 由 displayName 派生一个合法 id (sp-<slug>), 与 id 正则兼容 */
+export function slugIdFromDisplayName(displayName: string): string {
+  const slug = displayName
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, "-")
+    .replace(/^[^a-z0-9]+/, "")
+    .replace(/-{2,}/g, "-")
+    .slice(0, 30);
+  return `sp-${slug || `pasted-${Date.now().toString(36)}`}`;
+}

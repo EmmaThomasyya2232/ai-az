@@ -1,11 +1,12 @@
-// 本地 Azure 数据面 mock (端口 9999, 阶段五增强):
+// 本地 Azure 数据面 mock (端口 9999, 阶段五/六增强):
 //  - GET  /openai/models        -> 模型列表 (Cron 巡检探活)
 //  - POST /openai/deployments/:dep/chat/completions
 //        stream=true -> SSE / stream=false -> JSON (含 usage)
+//  - POST /openai/deployments/:dep/embeddings   -> 养号打卡 Embedding (2 token, 非零 Metrics)
 //  - POST /__mock/fail?times=3&status=429   故障注入 (chat 与 models 同时生效)
 //  - POST /__mock/reset                     清除注入
 //  - POST /__webhook                        接收并记录告警 webhook; GET /__webhook/last 查看
-// 用法: node mock-server.js &  并在 .dev.vars 中把节点 endpoint 指向 http://localhost:9999
+//  用法: node mock-server.js &  并在 .dev.vars 中把节点 endpoint 指向 http://localhost:9999
 const http = require("http");
 const fs = require("fs");
 const LOG = __dirname + "/mock-requests.log";
@@ -93,6 +94,22 @@ http
           model: "mock",
           choices: [{ message: { role: "assistant", content: "Hello from mock" } }],
           usage: usage(),
+        });
+      }
+
+      // ---- embeddings (养号打卡: 极小微调用, 消耗 ~2 token 留下非零 Metrics) ----
+      if (/\/embeddings\/?$/.test(u.pathname)) {
+        return json(res, 200, {
+          object: "list",
+          model: "text-embedding-3-small",
+          data: [
+            {
+              object: "embedding",
+              index: 0,
+              embedding: Array.from({ length: 4 }, (_, i) => (i + 1) / 100),
+            },
+          ],
+          usage: { prompt_tokens: 2, total_tokens: 2 },
         });
       }
 

@@ -19,7 +19,7 @@ export interface AlertPayload {
 }
 
 export function alertsEnabled(env: Env): boolean {
-  return env.ALERTS_ENABLED !== "off" && !!env.ALERT_WEBHOOK_URL;
+  return env.ALERTS_ENABLED !== "off";
 }
 
 function buildPayload(format: string, p: AlertPayload): unknown {
@@ -44,11 +44,16 @@ function buildPayload(format: string, p: AlertPayload): unknown {
 }
 
 /** 发送告警 webhook。返回是否发送成功; 内部吞掉所有错误。 */
-export async function sendAlert(env: Env, p: AlertPayload): Promise<boolean> {
-  if (!alertsEnabled(env)) return false;
+export async function sendAlert(
+  env: Env,
+  p: AlertPayload,
+  opts: { webhookUrl?: string } = {}
+): Promise<boolean> {
+  const url = opts.webhookUrl ?? env.ALERT_WEBHOOK_URL;
+  if (!alertsEnabled(env) || !url) return false;
   const format = (env.ALERT_WEBHOOK_FORMAT ?? "json").toLowerCase();
   try {
-    const resp = await fetch(env.ALERT_WEBHOOK_URL!, {
+    const resp = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(buildPayload(format, p)),

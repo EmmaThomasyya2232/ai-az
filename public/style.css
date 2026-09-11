@@ -99,6 +99,8 @@ textarea { width: 100%; resize: vertical; font-family: ui-monospace, Menlo, Cons
 .form-row { margin-bottom: 14px; }
 .form-row > label { display: block; color: var(--muted); margin-bottom: 6px; font-size: .85rem; }
 .form-row input, .form-row select { width: 100%; }
+.form-row textarea { width: 100%; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .82rem; line-height: 1.5; }
+.form-hint { margin-top: 10px; font-size: .85rem; min-height: 18px; color: var(--muted); }
 .form-hint { color: var(--muted); font-size: .8rem; margin-top: 4px; }
 .form-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 640px) { .form-cols { grid-template-columns: 1fr; } }
@@ -203,6 +205,10 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: .9rem; }
 }
 .spin { display: inline-block; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- 配额水水位 ---------- */
+.meter { width: 120px; height: 8px; background: var(--bg-soft); border-radius: 999px; overflow: hidden; display: inline-block; vertical-align: middle; margin-right: 8px; }
+.meter-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 999px; transition: width .3s; }
 
 @media (max-width: 860px) {
   #app { flex-direction: column; }

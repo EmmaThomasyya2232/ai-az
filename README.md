@@ -4,7 +4,7 @@
 
 部署于 Cloudflare Workers 的 Azure AI 综合控制面板（零 KV / 零 DO / 零 R2，唯一持久层为 D1）。
 
-> 规划文档见上级目录 `计划文档.md`。当前为**阶段二：D1 持久层**（阶段一网关 MVP 已完成）。
+> 规划文档见上级目录 `计划文档.md`。当前已完成：阶段一（网关 MVP）→ 阶段二（D1 持久层）→ 阶段三（用量/配额）→ 阶段四（面板）→ 阶段五（巡检/熔断/告警）→ **阶段六（SP 一键纳管 / 区域白名单探测 / 自动养号打卡 / Tier 与配额看板）**。
 
 ## 阶段一已实现
 
@@ -62,8 +62,38 @@
   - 手动触发：`POST /admin/patrol`（面板设置页「立即巡检」）/ 本地 `curl "http://localhost:8787/__scheduled?cron=*/5+*+*+*+*"`
 - ✅ **Webhook 告警**（`src/core/notify.ts`）：节点熔断打开/恢复、网关全部节点失败、SP 令牌刷新失败、巡检异常汇总；
   载荷格式 `ALERT_WEBHOOK_FORMAT`: `json`（结构化，默认）/ `slack` / `discord` / `feishu`
-- ✅ **一键部署交付**：`.github/workflows/deploy.yml` — push main 自动 typecheck → 远程 D1 迁移 → `wrangler deploy`
-  （需在仓库 Secrets 配置 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`，并在 `wrangler.jsonc` 填入真实 `database_id`）
+- ✅ **一键部署交付**：`.github/workflows/deploy.yml` — push main 自动 typecheck → 远程 D1 迁移 → `wrangler deploy`  （需在仓库 Secrets 配置 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`，并在 `wrangler.jsonc` 填入真实 `database_id`）
+
+## 阶段六已实现（SP 智能纳管 / 区域白名单 / 养号打卡 / Tier 看板）
+
+### 模块 1：服务主体智能纳管与订阅自动发现
+
+- ✅ **一键粘贴 JSON 录入**：面板「🛡️ 服务主体」页新增 `📋 一键粘贴 JSON` 弹窗——直接粘贴 `az ad sp create-for-rbac` 输出的标准 JSON（`appId` / `displayName` / `password` / `tenant`）即完成录入。
+- ✅ **OAuth2 验真**：录入时先请求 Entra ID 管理令牌（`client_credentials`，Scope `https://management.azure.com/.default`），凭据无效直接拒绝（401），提前拦截录入手误。
+- ✅ **订阅穿透自动发现**：验证通过后自动调用 ARM `GET /subscriptions`，动态拉取该凭据名下的全部订阅并入库存档（`azure_subscriptions` 表，`migrations/0005_subscriptions_warmup.sql`）。
+- ✅ **安全入库**：`client_secret` 落库前 AES-GCM 加密（沿用 `CREDENTIAL_ENCRYPTION_KEY`）；API：`POST /admin/sps/import`。
+
+### 模块 2：区域白名单动态探测引擎
+
+- ✅ **策略解析**：探测时调用 `policyAssignments`，经 `policyDefinitions` 解析 `listOfAllowedLocations` 白名单数组。
+- ✅ **探针回退**：策略未显式枚举时，在候选区域试探创建最小资源组（成功后立即删除），从 `RequestDisallowedByAzure` 错误文本用正则提取候选区域。
+- ✅ **落库与级联**：结果存入 `allowed_regions`（JSON 数组）；「🌱 养号打卡」页一键上架时区域下拉框**仅展示白名单候选区域**。API：`POST /admin/subs/:id/probe`。
+
+### 模块 3：养号打卡与提档引擎（Automated Warmup）
+
+- ✅ **一键安全上架**（`POST /admin/subs/:id/bootstrap`）：最佳合规区域 → 创建/复用资源组 → 创建 `S0` AIServices 实例 → 部署 `text-embedding-3-small`（优先 `GlobalStandard`，失败回退 `Standard`）→ 首发 2-token embedding 微调用（留下非零 Metrics）→ 标记 `warmup_target = 1` / `warmup_status = Active`。
+- ✅ **Cron 每日打卡**（`wrangler.jsonc` crons 新增 `0 4 * * *`，UTC 04:00 ≈ 北京时间 12:00）：遍历 `Active` 订阅向已部署模型发送微量请求（默认 2 token），执行耗时 / 消耗 token / 状态码写入 `warmup_logs`；本地测试 `curl "http://localhost:8787/cdn-cgi/local/scheduled?cron=0+4+*+*+*"`。
+- ✅ **提档感知与推送**：调用 CognitiveServices `QuotaTiers` API 检测 `currentTierName`；由 `Free Tier` 变为更高档时——数据库标记 `Upgraded`（停止打卡以节省资源）、经 Webhook（`json`/`slack`/`discord`/`feishu`，URL 可用 `system_configs.alert_webhook_url` 动态覆盖）推送「🎉 订阅提档成功」通知。
+- ✅ **系统配置表**（`system_configs`，API `GET /admin/config` / `PUT|DELETE /admin/config/:key`）：`warmup_enabled`、`warmup_model`、`warmup_default_region`、`alert_webhook_url` 等可在面板动态调整，优先于环境变量。
+
+### 模块 4：Tier 与配额看板（Radar Dashboard）
+
+- ✅ 侧边栏新增 **「🌱 养号打卡」** 与 **「📊 配额与 Tier」** 视图：
+  - **订阅资产画像**：订阅名/ID、服务主体、当前 Tier、合规区域白名单、打卡状态（`Pending/Active/Upgraded/Disabled`）、上架标记；行内操作：探测区域 / 一键上架 / 查看 Tier / 删除。
+  - **Tier 状态卡片**：`currentTierName`、分配时间、`tierUpgradePolicy`、`upgradeUnavailabilityReason`。
+  - **配额水位**：CognitiveServices `Usage` API 分区展示 TPM / RPM 等指标当前值 / 限额 / 使用率进度条。
+  - **打卡流水表格**：时间、实例、模型、消耗 tokens、状态码、延迟、结果、错误。
+- ✅ 面板新增「📋 一键粘贴 JSON」「↻ 同步全部订阅」（`POST /admin/subs/sync/:spId`）按钮。
 
 
 ## 快速开始
@@ -97,6 +127,11 @@ npm run dev                        # 本地开发 http://localhost:8787
 | `ALERT_WEBHOOK_URL` / `ALERT_WEBHOOK_FORMAT` / `ALERTS_ENABLED` | 阶段五 Webhook 告警：地址 / 载荷格式 json\|slack\|discord\|feishu / 开关 |
 | `CRON_PROBE_NODES` / `CRON_PREWARM_TOKENS` / `CRON_CLEANUP_LOGS` | 阶段五 Cron 巡检任务开关（默认全开） |
 | `TOKEN_PREWARM_WINDOW_SEC` | 阶段五令牌预热窗口（秒），剩余有效期小于该值即提前刷新，默认 1800 |
+| `CRON_WARMUP` | 阶段六每日养号打卡开关，设为 `off` 关闭；默认开启（依赖 DB 绑定） |
+| `WARMUP_DEFAULT_REGION` | 阶段六养号默认合规区域，探测失败/无策略时回退，默认 `centralus` |
+| `WARMUP_MODEL` | 阶段六打卡模型，默认 `text-embedding-3-small` |
+| `WARMUP_SKU_NAME` | 阶段六 AIServices 账户 SKU，默认 `S0` |
+| `WARMUP_MAX_TOKENS` | 阶段六单次打卡 tokens 上限，默认 32 |
 
 节点池示例：
 
@@ -217,8 +252,10 @@ curl -X DELETE "$B/admin/usage/logs?days=7" -H "$AT"
 - **🔑 网关密钥**：发放（明文仅显示一次，一键复制）、编辑限额、启停、吊销
 - **📜 用量日志**：最近请求明细（Key/节点/部署/状态/延迟/token/错误），按 Key 过滤，手动清理旧日志
 - **🖥️ 节点池**：节点 CRUD，部署映射（OpenAI 模型名→Azure 部署名）JSON 编辑
-- **🛡️ 服务主体**：Entra ID SP CRUD、令牌刷新/失效（L1+L2 缓存）
+- **🛡️ 服务主体**：Entra ID SP CRUD、令牌刷新/失效（L1+L2 缓存）、**一键粘贴 `az ad sp create-for-rbac` JSON 并自动发现订阅**
 - **☁️ Azure 资源浏览器**：选 SP → 订阅 → 资源组 → OpenAI/Cognitive 账户 → 部署列表，**一键 `listKeys` 导入为网关节点**（凭据自动加密落库）
+- **🌱 养号打卡**：订阅资产画像（Tier / 区域白名单 / 打卡状态），一键探测合规区域、🪴 一键上架（AIServices + Embedding 部署）、立即打卡、打卡流水
+- **📊 配额与 Tier**：订阅 Tier 状态卡片（提档策略 / 不可升级原因）、分区配额水位（TPM / RPM 使用率）
 - **⚙️ 设置**：服务健康、ARM 配置元信息、网关接入示例
 
 ### 部署
@@ -302,6 +339,7 @@ curl http://localhost:8787/v1/chat/completions \
 - **阶段三**：✅ 用量统计与配额限流（D1 化网关 Key、分钟限流 + 日配额、请求日志与统计 API）
 - **阶段四**：✅ 可视化管理面板（概览看板/Key/日志/节点池/服务主体/ARM 浏览器一键导入节点，原生 JS 零构建）
 - **阶段五**：✅ Cron 定时巡检（探活/令牌预热养号/日志清理）、✅ 节点熔断状态机、✅ Webhook 告警、✅ GitHub Actions 一键部署交付
+- **阶段六**：✅ SP 一键粘贴 JSON 纳管 + OAuth2 验真 + 订阅自动发现、✅ 区域白名单动态探测（策略解析 + 探针回退）、✅ 自动养号打卡（Cron 每日微量打卡 + 一键上架 + 提档检测通知）、✅ Tier 与配额看板
 
 
 > 阶段二起节点池优先存 D1（凭据 AES-GCM 加密、面板在线管理）；D1 未绑定或无数据时回落 `AZURE_NODES` 环境变量（明文 Secret）。
